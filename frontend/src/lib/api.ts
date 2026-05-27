@@ -4,6 +4,9 @@ import type {
   CodeProject,
   CopySummary,
   DesktopInstall,
+  LibraryCellChange,
+  LibraryKind,
+  LibraryRow,
   PairCodeProjectShare,
   PairCodeShareChange,
   PairCoworkSkillChange,
@@ -182,6 +185,27 @@ export const api = {
       targetDataDir,
       changes,
     });
+  },
+
+  // -------- Library / matrix view --------
+  // One call returns the full (item × profile) grid for the kind.
+  listLibrary(kind: LibraryKind): Promise<LibraryRow[]> {
+    const command =
+      kind === "extensions"
+        ? "list_library_extensions"
+        : kind === "mcp_servers"
+        ? "list_library_mcp"
+        : kind === "cowork_skills"
+        ? "list_library_cowork_skills"
+        : "list_library_preferences";
+    return invoke(command);
+  },
+
+  applyLibraryChanges(
+    kind: LibraryKind,
+    changes: LibraryCellChange[],
+  ): Promise<CopySummary> {
+    return invoke("apply_library_changes", { kind, changes });
   },
 };
 

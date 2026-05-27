@@ -1,51 +1,68 @@
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,100..800;1,100..800&family=Geist:wght@100..900&display=swap");
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
 @layer base {
   :root {
-    --background: 0 0% 100%;
-    --foreground: 222.2 47.4% 11.2%;
-    --muted: 210 40% 96.1%;
-    --muted-foreground: 215.4 16.3% 46.9%;
+    /* The Grid — light. Warm parchment neutrals + single lime accent. */
+    --background: 60 9% 98%;       /* stone-50 */
+    --foreground: 30 8% 12%;       /* stone-900 */
+    --muted: 60 5% 96%;            /* stone-100 */
+    --muted-foreground: 30 5% 45%; /* stone-500 */
     --popover: 0 0% 100%;
-    --popover-foreground: 222.2 47.4% 11.2%;
+    --popover-foreground: 30 8% 12%;
     --card: 0 0% 100%;
-    --card-foreground: 222.2 47.4% 11.2%;
-    --border: 214.3 31.8% 91.4%;
-    --input: 214.3 31.8% 91.4%;
-    --primary: 24 95% 53%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 210 40% 96.1%;
-    --secondary-foreground: 222.2 47.4% 11.2%;
-    --accent: 210 40% 96.1%;
-    --accent-foreground: 222.2 47.4% 11.2%;
-    --destructive: 0 84.2% 60.2%;
-    --destructive-foreground: 210 40% 98%;
-    --ring: 24 95% 53%;
-    --radius: 0.6rem;
+    --card-foreground: 30 8% 12%;
+    --border: 30 5% 90%;           /* stone-200 */
+    --input: 30 5% 90%;
+    --primary: 84 81% 35%;         /* lime-600 — accent */
+    --primary-foreground: 60 9% 98%;
+    --secondary: 60 5% 96%;
+    --secondary-foreground: 30 8% 12%;
+    --accent: 84 81% 35%;
+    --accent-foreground: 60 9% 98%;
+    --destructive: 0 60% 45%;
+    --destructive-foreground: 60 9% 98%;
+    --ring: 84 81% 35%;
+    --radius: 0.25rem;             /* 4px — sharp */
+
+    /* Cell-state palette. Each state has a glyph + this color. */
+    --state-shared: 84 81% 35%;    /* lime — live symlink */
+    --state-copied: 30 8% 25%;     /* deep stone — copied, neutral */
+    --state-diverged: 30 95% 45%;  /* amber — values differ */
+    --state-independent: 30 5% 60%;/* mid-grey — has it, not shared */
+    --state-absent: 30 5% 82%;     /* dim — doesn't have it */
   }
 
   .dark {
-    --background: 222.2 47.4% 6%;
-    --foreground: 213 31% 96%;
-    --muted: 217.2 32.6% 14%;
-    --muted-foreground: 215 20.2% 65.1%;
-    --popover: 222.2 47.4% 6%;
-    --popover-foreground: 213 31% 96%;
-    --card: 222.2 47.4% 8%;
-    --card-foreground: 213 31% 96%;
-    --border: 217.2 32.6% 17%;
-    --input: 217.2 32.6% 17%;
-    --primary: 24 95% 60%;
-    --primary-foreground: 0 0% 100%;
-    --secondary: 217.2 32.6% 14%;
-    --secondary-foreground: 213 31% 96%;
-    --accent: 217.2 32.6% 14%;
-    --accent-foreground: 213 31% 96%;
-    --destructive: 0 63% 45%;
-    --destructive-foreground: 210 40% 98%;
-    --ring: 24 95% 60%;
+    /* The Grid — dark. Near-black with phosphor lime. */
+    --background: 240 5% 5%;
+    --foreground: 60 5% 90%;
+    --muted: 240 4% 9%;
+    --muted-foreground: 240 4% 46%;
+    --popover: 240 5% 7%;
+    --popover-foreground: 60 5% 90%;
+    --card: 240 4% 7%;
+    --card-foreground: 60 5% 90%;
+    --border: 240 4% 16%;
+    --input: 240 4% 16%;
+    --primary: 84 82% 60%;          /* lime-400 — brighter on dark */
+    --primary-foreground: 240 5% 5%;
+    --secondary: 240 4% 12%;
+    --secondary-foreground: 60 5% 90%;
+    --accent: 84 82% 60%;
+    --accent-foreground: 240 5% 5%;
+    --destructive: 0 55% 55%;
+    --destructive-foreground: 60 5% 90%;
+    --ring: 84 82% 60%;
+
+    --state-shared: 84 82% 60%;
+    --state-copied: 60 5% 75%;
+    --state-diverged: 38 92% 60%;
+    --state-independent: 240 4% 50%;
+    --state-absent: 240 4% 22%;
   }
 }
 
@@ -59,13 +76,29 @@
     @apply h-full;
   }
   body {
-    @apply bg-background text-foreground;
+    @apply bg-background text-foreground antialiased;
+    font-family:
+      "Geist", -apple-system, BlinkMacSystemFont, system-ui, sans-serif;
     font-feature-settings:
       "rlig" 1,
-      "calt" 1;
+      "calt" 1,
+      "ss01" 1;
+    font-variant-ligatures: contextual;
+  }
+  /* Mono is the structural font — everything grid-shaped uses it. */
+  code,
+  pre,
+  kbd,
+  samp,
+  .font-mono {
     font-family:
-      -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI", Roboto,
-      "Helvetica Neue", Arial, sans-serif;
+      "JetBrains Mono Variable", "JetBrains Mono", "SF Mono", Menlo, Monaco,
+      monospace;
+    font-feature-settings:
+      "calt" 1,
+      "zero" 1,
+      "cv02" 1,
+      "ss02" 1;
   }
 }
 
@@ -80,5 +113,60 @@
   .scrollbar-thin::-webkit-scrollbar-thumb {
     background-color: hsl(var(--border));
     border-radius: 4px;
+  }
+  /* Hair-line border separators inside the matrix — half-opaque so the grid
+   * reads as a unified surface rather than 24 little boxes. */
+  .grid-divider {
+    box-shadow: inset 0 -1px 0 0 hsl(var(--border));
+  }
+  .text-state-shared {
+    color: hsl(var(--state-shared));
+  }
+  .text-state-copied {
+    color: hsl(var(--state-copied));
+  }
+  .text-state-diverged {
+    color: hsl(var(--state-diverged));
+  }
+  .text-state-independent {
+    color: hsl(var(--state-independent));
+  }
+  .text-state-absent {
+    color: hsl(var(--state-absent));
+  }
+
+  /* Page-load stagger. Children animate in with index-driven delay. */
+  .stagger-children > * {
+    animation: gridFadeIn 240ms ease-out both;
+  }
+  @keyframes gridFadeIn {
+    from {
+      opacity: 0;
+      transform: translateY(2px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+  /* Cell glyph swap on toggle. */
+  .glyph-swap {
+    transition:
+      color 120ms ease-out,
+      transform 120ms ease-out;
+  }
+  /* Pending bar slide-up. */
+  @keyframes pendingSlideUp {
+    from {
+      opacity: 0;
+      transform: translate(-50%, 12px);
+    }
+    to {
+      opacity: 1;
+      transform: translate(-50%, 0);
+    }
+  }
+  .pending-slide {
+    animation: pendingSlideUp 200ms ease-out;
   }
 }

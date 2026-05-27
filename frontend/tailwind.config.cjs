@@ -43,6 +43,30 @@ module.exports = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // "The Grid" cell state palette — paired with glyphs for double encoding.
+        state: {
+          shared: "hsl(var(--state-shared))",
+          copied: "hsl(var(--state-copied))",
+          diverged: "hsl(var(--state-diverged))",
+          independent: "hsl(var(--state-independent))",
+          absent: "hsl(var(--state-absent))",
+        },
+      },
+      fontFamily: {
+        sans: [
+          "Geist",
+          "-apple-system",
+          "BlinkMacSystemFont",
+          "system-ui",
+          "sans-serif",
+        ],
+        mono: [
+          "JetBrains Mono Variable",
+          "JetBrains Mono",
+          "SF Mono",
+          "Menlo",
+          "monospace",
+        ],
       },
       borderRadius: {
         lg: "var(--radius)",

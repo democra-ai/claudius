@@ -195,6 +195,50 @@ export type PairPreferenceChange = {
 };
 
 // -----------------------------
+// Library / matrix view — one row per content item, one cell per profile
+// -----------------------------
+
+export type CellState =
+  | "shared"      // ■ live symlink, ≥2 profiles in the same link group
+  | "copied"      // ● one-shot copy, value matches another profile
+  | "diverged"    // ◐ present in ≥2 profiles with different values
+  | "independent" // ○ present here, not aligned with any other profile
+  | "absent";     // · not in this profile
+
+export type LibraryCell = {
+  install_id: string;
+  install_name: string;
+  data_dir: string;
+  /** "default" | "profile" */
+  kind: string;
+  state: CellState;
+  present: boolean;
+  detail: string | null;
+  digest: string | null;
+  link_target_digest: string | null;
+};
+
+export type LibraryRow = {
+  id: string;
+  label: string;
+  description: string | null;
+  cells: LibraryCell[];
+};
+
+export type LibraryCellChange = {
+  row_id: string;
+  target_install_id: string;
+  wants: boolean;
+  source_install_id?: string;
+};
+
+export type LibraryKind =
+  | "extensions"
+  | "mcp_servers"
+  | "cowork_skills"
+  | "preferences";
+
+// -----------------------------
 // Shared
 // -----------------------------
 

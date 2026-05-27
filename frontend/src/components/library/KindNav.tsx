@@ -1,0 +1,115 @@
+import { Blocks, Boxes, Hammer, Settings2 } from "lucide-react";
+import { cn } from "@/lib/utils";
+import type { LibraryKind, LibraryRow } from "@/types";
+
+type KindDef = {
+  value: LibraryKind;
+  label: string;
+  icon: typeof Blocks;
+  /** Short hint shown beneath the label. */
+  blurb: string;
+};
+
+const KINDS: KindDef[] = [
+  {
+    value: "extensions",
+    label: "extensions",
+    icon: Blocks,
+    blurb: "Claude Desktop add-ons",
+  },
+  {
+    value: "mcp_servers",
+    label: "mcp servers",
+    icon: Boxes,
+    blurb: "claude_desktop_config.json",
+  },
+  {
+    value: "cowork_skills",
+    label: "cowork skills",
+    icon: Hammer,
+    blurb: "local-agent-mode/skills",
+  },
+  {
+    value: "preferences",
+    label: "preferences",
+    icon: Settings2,
+    blurb: "allowlisted prefs",
+  },
+];
+
+interface KindNavProps {
+  value: LibraryKind;
+  onChange: (kind: LibraryKind) => void;
+  /** Per-kind counts of {synced, total} for the badge — null = unknown yet. */
+  counts: Partial<Record<LibraryKind, { synced: number; total: number } | null>>;
+}
+
+/** Compute "synced" count for a kind given its rows. A row is "synced" if at
+ *  least one cell is shared OR copied; this is a quick alignment-health hint. */
+export function computeKindCount(rows: LibraryRow[]): {
+  synced: number;
+  total: number;
+} {
+  let synced = 0;
+  for (const row of rows) {
+    if (row.cells.some((c) => c.state === "shared" || c.state === "copied")) {
+      synced++;
+    }
+  }
+  return { synced, total: rows.length };
+}
+
+export function KindNav({ value, onChange, counts }: KindNavProps) {
+  return (
+    <nav className="flex flex-col gap-0.5">
+      <div className="px-3 pb-1.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
+        content
+      </div>
+      {KINDS.map((kind) => {
+        const Icon = kind.icon;
+        const active = value === kind.value;
+        const count = counts[kind.value];
+        return (
+          <button
+            key={kind.value}
+            type="button"
+            onClick={() => onChange(kind.value)}
+            className={cn(
+              "group flex items-center justify-between gap-2 rounded-sm px-3 py-1.5 text-left transition-colors",
+              active
+                ? "bg-accent/15 text-foreground"
+                : "text-foreground/70 hover:bg-accent/8 hover:text-foreground",
+            )}
+          >
+            <span className="flex min-w-0 items-center gap-2">
+              <Icon
+                className={cn(
+                  "h-3.5 w-3.5 shrink-0",
+                  active ? "text-primary" : "text-muted-foreground",
+                )}
+              />
+              <span className="flex flex-col leading-tight">
+                <span className="font-mono text-xs">{kind.label}</span>
+                <span className="font-sans text-[9px] text-muted-foreground/70">
+                  {kind.blurb}
+                </span>
+              </span>
+            </span>
+            {count ? (
+              <span
+                className={cn(
+                  "font-mono text-[10px] tabular-nums",
+                  count.synced > 0 && active
+                    ? "text-primary"
+                    : "text-muted-foreground/70",
+                )}
+              >
+                {count.synced}/{count.total}
+              </span>
+            ) : null}
+          </button>
+        );
+      })}
+    </nav>
+  );
+}

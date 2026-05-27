@@ -11,29 +11,32 @@ import {
 interface ToolbarProps {
   onRefresh: () => void;
   busy: boolean;
-  pendingCount: number;
-  onApply: () => void;
 }
 
-export function Toolbar({ onRefresh, busy, pendingCount, onApply }: ToolbarProps) {
+/**
+ * Top chrome. Title, refresh, theme toggle. The Apply action lives on the
+ * floating PendingBar inside the page body — keeping it out of the chrome
+ * means the user's hand stays close to the matrix when toggling.
+ */
+export function Toolbar({ onRefresh, busy }: ToolbarProps) {
   const { theme, toggle } = useTheme();
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : SunMoon;
 
   return (
-    <header className="flex h-14 items-center justify-between border-b bg-background/95 px-5 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex items-center gap-3">
-        <div className="flex h-8 w-8 items-center justify-center rounded-md bg-primary text-primary-foreground shadow">
-          <span className="text-sm font-semibold">C</span>
+    <header className="flex h-12 items-center justify-between border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+      <div className="flex items-center gap-2.5">
+        <div className="flex h-6 w-6 items-center justify-center rounded-sm bg-primary font-mono text-[11px] font-semibold text-primary-foreground">
+          ▣
         </div>
-        <div className="leading-tight">
-          <h1 className="text-sm font-semibold">Claude Multiprofile</h1>
-          <p className="text-xs text-muted-foreground">
-            Switch Desktop accounts · share Cowork & Code locally
-          </p>
+        <div className="font-mono text-[13px] uppercase tracking-wider">
+          claude<span className="text-muted-foreground">·</span>multiprofile
         </div>
+        <span className="ml-2 font-mono text-[10px] text-muted-foreground/70">
+          content library
+        </span>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className="flex items-center gap-1">
         <Tooltip>
           <TooltipTrigger asChild>
             <Button
@@ -41,29 +44,23 @@ export function Toolbar({ onRefresh, busy, pendingCount, onApply }: ToolbarProps
               size="icon"
               onClick={toggle}
               aria-label="Toggle theme"
+              className="h-8 w-8"
             >
-              <ThemeIcon />
+              <ThemeIcon className="h-3.5 w-3.5" />
             </Button>
           </TooltipTrigger>
-          <TooltipContent>Theme: {theme}</TooltipContent>
+          <TooltipContent>theme: {theme}</TooltipContent>
         </Tooltip>
-        <Separator orientation="vertical" className="h-5" />
+        <Separator orientation="vertical" className="h-4" />
         <Button
           variant="ghost"
           size="sm"
           onClick={onRefresh}
           disabled={busy}
-          className="gap-2"
+          className="h-8 gap-1.5 font-mono text-xs"
         >
-          <RefreshCw className={busy ? "animate-spin" : ""} />
-          Refresh
-        </Button>
-        <Button
-          size="sm"
-          onClick={onApply}
-          disabled={busy || pendingCount === 0}
-        >
-          Apply{pendingCount ? ` (${pendingCount})` : ""}
+          <RefreshCw className={busy ? "h-3 w-3 animate-spin" : "h-3 w-3"} />
+          refresh
         </Button>
       </div>
     </header>

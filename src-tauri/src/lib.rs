@@ -1,6 +1,6 @@
 use chrono::{SecondsFormat, Utc};
 use serde::{Deserialize, Serialize};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::env;
 use std::fs;
 use std::io::ErrorKind;
@@ -2660,6 +2660,558 @@ pub fn apply_pair_preference_sharing(
     Ok(CopySummary { copied, skipped })
 }
 
+// ---------------------------------------------------------------------------
+// Library views — matrix across all profiles
+// ---------------------------------------------------------------------------
+// The pair-wise API ships per-kind (extensions, mcp, skills, prefs, code-h).
+// The "Content Library" / matrix UX needs the SAME data but reshaped: one
+// row per item, one cell per (item, profile) intersection, state computed
+// globally across the row so the UI can render shared/copied/diverged at a
+// glance.
+//
+// Design ref: docs/plans/2026-05-27-content-library-grid.md
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LibraryCell {
+    pub install_id: String,
+    pub install_name: String,
+    pub data_dir: String,
+    /// "default" | "profile"
+    pub kind: String,
+    /// One of: "absent" | "independent" | "copied" | "diverged" | "shared".
+    /// Computed across the row by `compute_row_states`.
+    pub state: String,
+    pub present: bool,
+    /// Short one-line preview used in tooltips and the DetailSheet.
+    pub detail: Option<String>,
+    /// 16-hex-char digest of the value, for diverged detection in copy-mode.
+    pub digest: Option<String>,
+    /// 16-hex-char digest of the symlink's resolved target, for shared-group
+    /// detection in symlink-mode. None when the cell is not a symlink.
+    pub link_target_digest: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LibraryRow {
+    pub id: String,
+    pub label: String,
+    pub description: Option<String>,
+    pub cells: Vec<LibraryCell>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct LibraryCellChange {
+    /// The row id (e.g. extension id, mcp server name, "ui:darkMode", skill id).
+    pub row_id: String,
+    /// The profile we're flipping on/off.
+    pub target_install_id: String,
+    /// New desired presence.
+    pub wants: bool,
+    /// Optional explicit source for "wants=true". When None, the apply
+    /// function picks the first present sibling cell as the source.
+    pub source_install_id: Option<String>,
+}
+
+/// Stable, fast (non-cryptographic) hash of a JSON value for diverged-detection.
+fn value_digest(value: &serde_json::Value) -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let s = serde_json::to_string(value).unwrap_or_default();
+    let mut h = DefaultHasher::new();
+    s.hash(&mut h);
+    format!("{:016x}", h.finish())
+}
+
+/// If `path` is a symlink, return a digest of its canonical resolved target;
+/// otherwise None. Two cells in the same link group share the same digest.
+fn symlink_target_digest(path: &Path) -> Option<String> {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_symlink() {
+        return None;
+    }
+    let raw = fs::read_link(path).ok()?;
+    let abs = if raw.is_absolute() {
+        raw
+    } else {
+        path.parent().unwrap_or(Path::new("/")).join(raw)
+    };
+    let canonical = abs.canonicalize().ok()?;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    canonical.to_string_lossy().hash(&mut h);
+    Some(format!("{:016x}", h.finish()))
+}
+
+/// Compact human preview of any JSON value — used in cell tooltips.
+fn compact_value_preview(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Bool(b) => if *b { "true".into() } else { "false".into() },
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::String(s) => {
+            if s.len() > 60 { format!("{}…", &s[..60]) } else { s.clone() }
+        }
+        _ => {
+            let s = serde_json::to_string(v).unwrap_or_default();
+            if s.len() > 60 { format!("{}…", &s[..60]) } else { s }
+        }
+    }
+}
+
+/// Walk a row's cells and assign the right state to each, given whether
+/// the underlying content type supports live symlink sharing.
+///
+/// Rules:
+///   - absent: !present
+///   - shared (symlink kinds only): ≥2 present cells share the same
+///     link_target_digest
+///   - copied (copy kinds only): another present cell has the same digest
+///     AND no present cell has a different digest
+///   - diverged (copy kinds only): another present cell has a different digest
+///   - independent: present, but nothing else aligns
+fn compute_row_states(row: &mut LibraryRow, supports_symlink: bool) {
+    let mut digest_counts: HashMap<String, usize> = HashMap::new();
+    let mut link_counts: HashMap<String, usize> = HashMap::new();
+    let mut present_total = 0_usize;
+
+    for cell in &row.cells {
+        if !cell.present {
+            continue;
+        }
+        present_total += 1;
+        if let Some(d) = &cell.digest {
+            *digest_counts.entry(d.clone()).or_insert(0) += 1;
+        }
+        if let Some(d) = &cell.link_target_digest {
+            *link_counts.entry(d.clone()).or_insert(0) += 1;
+        }
+    }
+
+    for cell in &mut row.cells {
+        if !cell.present {
+            cell.state = "absent".into();
+            continue;
+        }
+        if supports_symlink {
+            if let Some(d) = &cell.link_target_digest {
+                if link_counts.get(d).copied().unwrap_or(0) >= 2 {
+                    cell.state = "shared".into();
+                    continue;
+                }
+            }
+            cell.state = "independent".into();
+            continue;
+        }
+        // Copy semantics.
+        if present_total <= 1 {
+            cell.state = "independent".into();
+            continue;
+        }
+        let my_digest = match &cell.digest {
+            Some(d) => d,
+            None => {
+                cell.state = "independent".into();
+                continue;
+            }
+        };
+        let mine_total = digest_counts.get(my_digest).copied().unwrap_or(1);
+        let others_same = mine_total.saturating_sub(1);
+        let others_total = present_total - 1;
+        let others_different = others_total.saturating_sub(others_same);
+        cell.state = if others_different > 0 {
+            "diverged".into()
+        } else if others_same > 0 {
+            "copied".into()
+        } else {
+            "independent".into()
+        };
+    }
+}
+
+// ----- Extensions library (matrix shape) -----
+
+pub fn list_extensions_library_grid() -> Result<Vec<LibraryRow>, String> {
+    let installs = list_desktop_installs()?;
+    let mut ids: BTreeMap<String, ()> = BTreeMap::new();
+    let mut per_install: Vec<(DesktopInstall, Vec<ExtensionEntry>)> = Vec::new();
+    for install in installs {
+        let exts = list_extensions_in_dir(Path::new(&install.data_dir)).unwrap_or_default();
+        for e in &exts {
+            ids.insert(e.id.clone(), ());
+        }
+        per_install.push((install, exts));
+    }
+
+    let mut rows: Vec<LibraryRow> = ids
+        .into_keys()
+        .map(|id| {
+            let cells = per_install
+                .iter()
+                .map(|(install, exts)| {
+                    let entry = exts.iter().find(|e| e.id == id);
+                    let dir = Path::new(&install.data_dir).join(EXT_DIR_NAME).join(&id);
+                    let link_d = symlink_target_digest(&dir);
+                    LibraryCell {
+                        install_id: install.id.clone(),
+                        install_name: install.name.clone(),
+                        data_dir: install.data_dir.clone(),
+                        kind: install.kind.clone(),
+                        state: String::new(),
+                        present: entry.is_some(),
+                        detail: entry.map(|e| {
+                            if e.has_settings {
+                                "files+settings".into()
+                            } else {
+                                "files".into()
+                            }
+                        }),
+                        digest: None,
+                        link_target_digest: link_d,
+                    }
+                })
+                .collect();
+            LibraryRow {
+                id: id.clone(),
+                label: id,
+                description: None,
+                cells,
+            }
+        })
+        .collect();
+
+    for row in &mut rows {
+        compute_row_states(row, true);
+    }
+    Ok(rows)
+}
+
+// ----- MCP servers library -----
+
+pub fn list_mcp_library() -> Result<Vec<LibraryRow>, String> {
+    let installs = list_desktop_installs()?;
+    let configs: Vec<(DesktopInstall, serde_json::Value)> = installs
+        .into_iter()
+        .map(|i| {
+            let cfg = read_desktop_config(Path::new(&i.data_dir))
+                .unwrap_or(serde_json::json!({}));
+            (i, cfg)
+        })
+        .collect();
+
+    let mut names: BTreeMap<String, ()> = BTreeMap::new();
+    for (_, cfg) in &configs {
+        if let Some(servers) = mcp_servers_obj(cfg) {
+            for k in servers.keys() {
+                names.insert(k.clone(), ());
+            }
+        }
+    }
+
+    let mut rows: Vec<LibraryRow> = names
+        .into_keys()
+        .map(|name| {
+            let cells = configs
+                .iter()
+                .map(|(install, cfg)| {
+                    let val = mcp_servers_obj(cfg).and_then(|s| s.get(&name));
+                    LibraryCell {
+                        install_id: install.id.clone(),
+                        install_name: install.name.clone(),
+                        data_dir: install.data_dir.clone(),
+                        kind: install.kind.clone(),
+                        state: String::new(),
+                        present: val.is_some(),
+                        detail: val.and_then(mcp_server_summary),
+                        digest: val.map(value_digest),
+                        link_target_digest: None,
+                    }
+                })
+                .collect();
+            LibraryRow {
+                id: name.clone(),
+                label: name,
+                description: None,
+                cells,
+            }
+        })
+        .collect();
+
+    for row in &mut rows {
+        compute_row_states(row, false);
+    }
+    Ok(rows)
+}
+
+// ----- Cowork Skills library -----
+
+pub fn list_cowork_skills_library() -> Result<Vec<LibraryRow>, String> {
+    let installs = list_desktop_installs()?;
+    // (install, combo_dir_if_any, manifest_value)
+    let per_install: Vec<(DesktopInstall, Option<PathBuf>, serde_json::Value)> = installs
+        .into_iter()
+        .map(|install| {
+            let data_dir = PathBuf::from(&install.data_dir);
+            let combo = find_skills_combo_dir(&data_dir).unwrap_or(None);
+            let manifest = match &combo {
+                Some(p) => read_skills_manifest(p)
+                    .unwrap_or(serde_json::json!({ "skills": [] })),
+                None => serde_json::json!({ "skills": [] }),
+            };
+            (install, combo, manifest)
+        })
+        .collect();
+
+    // Union of skill_ids, plus best-effort name/description from any manifest
+    // that has the entry.
+    let mut ids: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    for (_, _, manifest) in &per_install {
+        for entry in manifest_skill_entries(manifest) {
+            if let Some(id) = entry_skill_id(entry) {
+                let name = entry.get("name").and_then(|v| v.as_str()).map(String::from);
+                let desc = entry
+                    .get("description")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                ids.entry(id.into()).or_insert((name, desc));
+            }
+        }
+    }
+
+    let mut rows: Vec<LibraryRow> = ids
+        .into_iter()
+        .map(|(id, (name, desc))| {
+            let cells = per_install
+                .iter()
+                .map(|(install, combo, manifest)| {
+                    let entry_owned = manifest_skill_entries(manifest)
+                        .into_iter()
+                        .find(|e| entry_skill_id(e) == Some(&id))
+                        .cloned();
+                    let (present, detail, digest, link_d) = match entry_owned {
+                        Some(entry) => {
+                            let enabled = entry_enabled(&entry);
+                            let detail = if enabled { "enabled" } else { "disabled" };
+                            let d = value_digest(&entry);
+                            let link_d = combo.as_ref().and_then(|c| {
+                                symlink_target_digest(&c.join(SKILLS_SUBDIR).join(&id))
+                            });
+                            (true, Some(detail.into()), Some(d), link_d)
+                        }
+                        None => (false, None, None, None),
+                    };
+                    LibraryCell {
+                        install_id: install.id.clone(),
+                        install_name: install.name.clone(),
+                        data_dir: install.data_dir.clone(),
+                        kind: install.kind.clone(),
+                        state: String::new(),
+                        present,
+                        detail,
+                        digest,
+                        link_target_digest: link_d,
+                    }
+                })
+                .collect();
+            LibraryRow {
+                id: id.clone(),
+                label: name.unwrap_or(id),
+                description: desc,
+                cells,
+            }
+        })
+        .collect();
+
+    for row in &mut rows {
+        compute_row_states(row, true);
+    }
+    Ok(rows)
+}
+
+// ----- Preferences library -----
+
+pub fn list_preferences_library() -> Result<Vec<LibraryRow>, String> {
+    let installs = list_desktop_installs()?;
+    let configs: Vec<(DesktopInstall, serde_json::Value, serde_json::Value)> = installs
+        .into_iter()
+        .map(|install| {
+            let ui = read_ui_config(Path::new(&install.data_dir))
+                .unwrap_or(serde_json::json!({}));
+            let desktop = read_desktop_config(Path::new(&install.data_dir))
+                .unwrap_or(serde_json::json!({}));
+            (install, ui, desktop)
+        })
+        .collect();
+
+    let mut rows: Vec<LibraryRow> = Vec::new();
+    let scopes_and_keys: Vec<(&str, &str)> = SAFE_UI_KEYS
+        .iter()
+        .map(|k| ("ui", *k))
+        .chain(SAFE_DESKTOP_PREF_KEYS.iter().map(|k| ("desktop_pref", *k)))
+        .collect();
+
+    for (scope, key) in scopes_and_keys {
+        let cells = configs
+            .iter()
+            .map(|(install, ui, desktop)| {
+                let val = match scope {
+                    "ui" => ui.get(key).cloned(),
+                    "desktop_pref" => desktop
+                        .get("preferences")
+                        .and_then(|p| p.get(key))
+                        .cloned(),
+                    _ => None,
+                };
+                LibraryCell {
+                    install_id: install.id.clone(),
+                    install_name: install.name.clone(),
+                    data_dir: install.data_dir.clone(),
+                    kind: install.kind.clone(),
+                    state: String::new(),
+                    present: val.is_some(),
+                    detail: val.as_ref().map(compact_value_preview),
+                    digest: val.as_ref().map(value_digest),
+                    link_target_digest: None,
+                }
+            })
+            .collect();
+        rows.push(LibraryRow {
+            id: format!("{scope}:{key}"),
+            label: pref_label(key),
+            description: Some(
+                if scope == "ui" {
+                    "UI setting (config.json)"
+                } else {
+                    "Cowork preference"
+                }
+                .into(),
+            ),
+            cells,
+        });
+    }
+
+    for row in &mut rows {
+        compute_row_states(row, false);
+    }
+    Ok(rows)
+}
+
+// ----- Unified library apply -----
+
+/// Dispatch a single cell flip to the right pair-wise apply helper.
+/// Auto-picks a source: explicit `source_install_id` if provided, else the
+/// first present cell in the same row that isn't the target.
+pub fn apply_library_change(
+    kind: String,
+    change: LibraryCellChange,
+) -> Result<bool, String> {
+    let installs = list_desktop_installs()?;
+    let target = installs
+        .iter()
+        .find(|i| i.id == change.target_install_id)
+        .ok_or_else(|| format!("Target profile {} not found", change.target_install_id))?
+        .clone();
+
+    // Pick a source: explicit, or first present sibling.
+    let source = if let Some(explicit) = &change.source_install_id {
+        installs
+            .iter()
+            .find(|i| &i.id == explicit)
+            .cloned()
+            .ok_or_else(|| format!("Source profile {explicit} not found"))?
+    } else {
+        // Need to know which profiles currently have the row's content.
+        let rows = match kind.as_str() {
+            "extensions" => list_extensions_library_grid()?,
+            "mcp_servers" => list_mcp_library()?,
+            "cowork_skills" => list_cowork_skills_library()?,
+            "preferences" => list_preferences_library()?,
+            _ => return Err(format!("Unknown library kind: {kind}")),
+        };
+        let row = rows
+            .into_iter()
+            .find(|r| r.id == change.row_id)
+            .ok_or_else(|| format!("Row {} not found in {kind}", change.row_id))?;
+        // Prefer the default install if it has it; else any other present cell.
+        let pick = row
+            .cells
+            .iter()
+            .find(|c| c.install_id != change.target_install_id && c.present && c.kind == "default")
+            .or_else(|| {
+                row.cells
+                    .iter()
+                    .find(|c| c.install_id != change.target_install_id && c.present)
+            });
+        match pick {
+            Some(c) => installs
+                .iter()
+                .find(|i| i.id == c.install_id)
+                .cloned()
+                .ok_or_else(|| "Source resolution failed".to_string())?,
+            None if !change.wants => {
+                // Nothing to copy from but user wants to remove — use any
+                // other profile as a placeholder source; the OFF branch of
+                // each pair function only reads target.
+                installs
+                    .iter()
+                    .find(|i| i.id != change.target_install_id)
+                    .cloned()
+                    .ok_or_else(|| {
+                        "Need at least two profiles for sharing operations.".to_string()
+                    })?
+            }
+            None => {
+                return Err("No profile holds this item; nothing to copy from.".into());
+            }
+        }
+    };
+
+    let source_dir = PathBuf::from(&source.data_dir);
+    let target_dir = PathBuf::from(&target.data_dir);
+
+    match kind.as_str() {
+        "extensions" => {
+            if change.wants {
+                copy_extension_between_dirs(&source_dir, &target_dir, &change.row_id)?;
+                Ok(true)
+            } else {
+                // Reuse the pair API in "make independent" mode.
+                set_pair_extension_shared(&source_dir, &target_dir, &change.row_id, false)
+            }
+        }
+        "mcp_servers" => {
+            set_pair_mcp_server_copied(&source_dir, &target_dir, &change.row_id, change.wants)
+        }
+        "cowork_skills" => {
+            set_pair_cowork_skill_shared(&source_dir, &target_dir, &change.row_id, change.wants)
+        }
+        "preferences" => {
+            let colon = change.row_id.find(':').ok_or_else(|| {
+                "Preference row id must be 'scope:key'".to_string()
+            })?;
+            let scope = &change.row_id[..colon];
+            let key = &change.row_id[colon + 1..];
+            set_pair_preference_copied(&source_dir, &target_dir, key, scope, change.wants)
+        }
+        other => Err(format!("Unknown library kind: {other}")),
+    }
+}
+
+pub fn apply_library_changes(
+    kind: String,
+    changes: Vec<LibraryCellChange>,
+) -> Result<CopySummary, String> {
+    let mut copied = 0;
+    let mut skipped = 0;
+    for change in changes {
+        match apply_library_change(kind.clone(), change) {
+            Ok(true) => copied += 1,
+            Ok(false) => skipped += 1,
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(CopySummary { copied, skipped })
+}
+
 mod commands {
     use super::*;
 
@@ -2820,6 +3372,35 @@ mod commands {
     ) -> Result<CopySummary, String> {
         super::apply_pair_preference_sharing(source_data_dir, target_data_dir, changes)
     }
+
+    // Library / matrix view — one call returns a row × profile grid for a kind.
+    #[tauri::command]
+    pub fn list_library_extensions() -> Result<Vec<LibraryRow>, String> {
+        super::list_extensions_library_grid()
+    }
+
+    #[tauri::command]
+    pub fn list_library_mcp() -> Result<Vec<LibraryRow>, String> {
+        super::list_mcp_library()
+    }
+
+    #[tauri::command]
+    pub fn list_library_cowork_skills() -> Result<Vec<LibraryRow>, String> {
+        super::list_cowork_skills_library()
+    }
+
+    #[tauri::command]
+    pub fn list_library_preferences() -> Result<Vec<LibraryRow>, String> {
+        super::list_preferences_library()
+    }
+
+    #[tauri::command]
+    pub fn apply_library_changes(
+        kind: String,
+        changes: Vec<LibraryCellChange>,
+    ) -> Result<CopySummary, String> {
+        super::apply_library_changes(kind, changes)
+    }
 }
 
 pub fn run() {
@@ -2845,7 +3426,12 @@ pub fn run() {
             commands::list_pair_cowork_skills_sharing,
             commands::apply_pair_cowork_skills_sharing,
             commands::list_pair_preference_sharing,
-            commands::apply_pair_preference_sharing
+            commands::apply_pair_preference_sharing,
+            commands::list_library_extensions,
+            commands::list_library_mcp,
+            commands::list_library_cowork_skills,
+            commands::list_library_preferences,
+            commands::apply_library_changes
         ])
         .run(tauri::generate_context!())
         .expect("error while running Claude Multiprofile");
@@ -3873,6 +4459,97 @@ mod tests {
         )
         .unwrap();
         assert!(tgt_manifest["skills"].as_array().unwrap().is_empty());
+    }
+
+    fn make_cell(install_id: &str, present: bool, digest: Option<&str>, link: Option<&str>) -> LibraryCell {
+        LibraryCell {
+            install_id: install_id.into(),
+            install_name: install_id.into(),
+            data_dir: "/tmp".into(),
+            kind: "profile".into(),
+            state: String::new(),
+            present,
+            detail: None,
+            digest: digest.map(String::from),
+            link_target_digest: link.map(String::from),
+        }
+    }
+
+    #[test]
+    fn compute_row_states_symlink_groups_two_or_more_as_shared() {
+        let mut row = LibraryRow {
+            id: "ext-a".into(),
+            label: "ext-a".into(),
+            description: None,
+            cells: vec![
+                make_cell("a", true, None, Some("link-X")),
+                make_cell("b", true, None, Some("link-X")),
+                make_cell("c", true, None, Some("link-Y")),
+                make_cell("d", false, None, None),
+            ],
+        };
+        compute_row_states(&mut row, /* supports_symlink */ true);
+        assert_eq!(row.cells[0].state, "shared");
+        assert_eq!(row.cells[1].state, "shared");
+        assert_eq!(row.cells[2].state, "independent"); // only one in its link group
+        assert_eq!(row.cells[3].state, "absent");
+    }
+
+    #[test]
+    fn compute_row_states_copy_detects_diverged_when_digests_disagree() {
+        let mut row = LibraryRow {
+            id: "mcp-foo".into(),
+            label: "mcp-foo".into(),
+            description: None,
+            cells: vec![
+                make_cell("a", true, Some("hashA"), None),
+                make_cell("b", true, Some("hashA"), None),
+                make_cell("c", true, Some("hashB"), None),
+                make_cell("d", false, None, None),
+            ],
+        };
+        compute_row_states(&mut row, /* supports_symlink */ false);
+        // a and b have the same digest, but c diverges — everybody present
+        // that has a sibling is "diverged" because at least one other present
+        // cell has a different digest.
+        assert_eq!(row.cells[0].state, "diverged");
+        assert_eq!(row.cells[1].state, "diverged");
+        assert_eq!(row.cells[2].state, "diverged");
+        assert_eq!(row.cells[3].state, "absent");
+    }
+
+    #[test]
+    fn compute_row_states_copy_marks_unique_present_as_independent() {
+        let mut row = LibraryRow {
+            id: "pref-x".into(),
+            label: "x".into(),
+            description: None,
+            cells: vec![
+                make_cell("a", true, Some("hashA"), None),
+                make_cell("b", false, None, None),
+            ],
+        };
+        compute_row_states(&mut row, false);
+        assert_eq!(row.cells[0].state, "independent");
+        assert_eq!(row.cells[1].state, "absent");
+    }
+
+    #[test]
+    fn compute_row_states_copy_marks_two_matching_as_copied() {
+        let mut row = LibraryRow {
+            id: "mcp-bar".into(),
+            label: "mcp-bar".into(),
+            description: None,
+            cells: vec![
+                make_cell("a", true, Some("h"), None),
+                make_cell("b", true, Some("h"), None),
+                make_cell("c", false, None, None),
+            ],
+        };
+        compute_row_states(&mut row, false);
+        assert_eq!(row.cells[0].state, "copied");
+        assert_eq!(row.cells[1].state, "copied");
+        assert_eq!(row.cells[2].state, "absent");
     }
 
     #[test]
