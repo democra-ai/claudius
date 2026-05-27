@@ -21,8 +21,8 @@ const EMPTY_HINTS: Record<LibraryKind, string> = {
   code_history: "No Cowork code sessions yet in any profile.",
   cowork_sessions: "No Cowork agent-mode sessions in any profile.",
   extensions: "No extensions installed in any profile.",
-  mcp_servers: "No MCP servers configured in any claude_desktop_config.json.",
-  cowork_skills: "No Cowork skills — open Cowork in any profile once.",
+  mcp_servers: "No MCPs configured in any claude_desktop_config.json.",
+  cowork_skills: "No Skills — open Cowork in any profile once.",
   preferences: "Allowlisted preferences not set in any profile.",
 };
 
@@ -555,7 +555,7 @@ export default function ContentLibraryPage() {
                 "flex cursor-pointer items-start gap-2 pl-6 pr-2 font-sans text-[10px]",
                 busy ? "text-muted-foreground/50" : "text-muted-foreground",
               )}
-              title="Copy skills, plugins, MCP servers from ~/.claude. Excludes chat history and credentials."
+              title="Copy skills, plugins, MCPs from ~/.claude. Excludes chat history and credentials."
             >
               <Checkbox
                 checked={newSeedCode}

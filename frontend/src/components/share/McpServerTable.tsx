@@ -51,7 +51,7 @@ export function McpServerTable({
       onToggle={onToggle}
       columnA={columnA}
       columnB={columnB}
-      emptyHint="No MCP servers configured in either profile. Add one to claude_desktop_config.json and click Refresh."
+      emptyHint="No MCPs configured in either profile. Add one to claude_desktop_config.json and click Refresh."
     />
   );
 }

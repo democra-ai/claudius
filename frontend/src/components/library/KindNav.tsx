@@ -31,13 +31,13 @@ const KINDS: KindDef[] = [
   },
   {
     value: "mcp_servers",
-    label: "MCP servers",
+    label: "MCPs",
     icon: Boxes,
     blurb: "claude_desktop_config.json",
   },
   {
     value: "cowork_skills",
-    label: "Cowork skills",
+    label: "Skills",
     icon: Hammer,
     blurb: "local-agent skills",
   },

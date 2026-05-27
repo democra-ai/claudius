@@ -116,7 +116,7 @@ export function CoworkSkillsTable({
       onToggle={onToggle}
       columnA={columnA}
       columnB={columnB}
-      emptyHint="No Cowork skills in either profile yet. Install one via Claude Desktop, then Refresh."
+      emptyHint="No Skills in either profile yet. Install one via Claude Desktop, then Refresh."
     />
   );
 }

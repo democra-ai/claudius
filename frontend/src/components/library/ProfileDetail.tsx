@@ -465,13 +465,13 @@ export function ProfileDetail({
                 />
                 <StatRow
                   icon={Boxes}
-                  label="MCP servers"
+                  label="MCPs"
                   value={stats.mcp_server_count}
                   mono
                 />
                 <StatRow
                   icon={Hammer}
-                  label="Cowork skills"
+                  label="Skills"
                   value={stats.cowork_skill_count}
                   mono
                 />
