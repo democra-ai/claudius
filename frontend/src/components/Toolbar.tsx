@@ -28,14 +28,9 @@ export function Toolbar({ onRefresh, busy }: ToolbarProps) {
         <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary font-display text-[14px] font-semibold text-primary-foreground">
           C
         </div>
-        <div className="flex items-baseline gap-2">
-          <h1 className="font-display text-[16px] leading-none tracking-tight">
-            Claude Multiprofile
-          </h1>
-          <span className="font-sans text-[11px] text-muted-foreground/80">
-            · Content library
-          </span>
-        </div>
+        <h1 className="font-display text-[16px] leading-none tracking-tight">
+          Claude Multiprofile
+        </h1>
       </div>
 
       <div className="flex items-center gap-1">

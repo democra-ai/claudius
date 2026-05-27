@@ -2782,11 +2782,26 @@ pub struct LibraryRow {
     /// project. Defaults to true.
     #[serde(default = "default_true")]
     pub interactive: bool,
+    /// Section bucket. Rows with the same `group` value get rendered under
+    /// one bold uppercase section header in the matrix, in the style of
+    /// the ProfileDetail panel's sections. None = no grouping.
+    #[serde(default)]
+    pub group: Option<String>,
 }
 
 #[allow(dead_code)]
 fn default_true() -> bool {
     true
+}
+
+/// "user" → "User", "third-party" → "Third-party". Cheap helper used to
+/// title-case the creatorType in skill-group labels.
+fn other_titlecase(s: &str) -> String {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -2966,6 +2981,7 @@ pub fn list_extensions_library_grid() -> Result<Vec<LibraryRow>, String> {
                 description: None,
                 cells,
                 interactive: true,
+                group: None,
             }
         })
         .collect();
@@ -3024,6 +3040,7 @@ pub fn list_mcp_library() -> Result<Vec<LibraryRow>, String> {
                 description: None,
                 cells,
                 interactive: true,
+                group: None,
             }
         })
         .collect();
@@ -3053,9 +3070,10 @@ pub fn list_cowork_skills_library() -> Result<Vec<LibraryRow>, String> {
         })
         .collect();
 
-    // Union of skill_ids, plus best-effort name/description from any manifest
-    // that has the entry.
-    let mut ids: BTreeMap<String, (Option<String>, Option<String>)> = BTreeMap::new();
+    // Union of skill_ids, plus best-effort name/description/creatorType
+    // from any manifest that has the entry. creatorType drives section
+    // grouping in the UI ("Anthropic skills" vs "User skills").
+    let mut ids: BTreeMap<String, (Option<String>, Option<String>, Option<String>)> = BTreeMap::new();
     for (_, _, manifest) in &per_install {
         for entry in manifest_skill_entries(manifest) {
             if let Some(id) = entry_skill_id(entry) {
@@ -3064,14 +3082,18 @@ pub fn list_cowork_skills_library() -> Result<Vec<LibraryRow>, String> {
                     .get("description")
                     .and_then(|v| v.as_str())
                     .map(String::from);
-                ids.entry(id.into()).or_insert((name, desc));
+                let creator = entry
+                    .get("creatorType")
+                    .and_then(|v| v.as_str())
+                    .map(String::from);
+                ids.entry(id.into()).or_insert((name, desc, creator));
             }
         }
     }
 
     let mut rows: Vec<LibraryRow> = ids
         .into_iter()
-        .map(|(id, (name, desc))| {
+        .map(|(id, (name, desc, creator))| {
             let cells = per_install
                 .iter()
                 .map(|(install, combo, manifest)| {
@@ -3104,12 +3126,18 @@ pub fn list_cowork_skills_library() -> Result<Vec<LibraryRow>, String> {
                     }
                 })
                 .collect();
+            let group_label = match creator.as_deref() {
+                Some("anthropic") => "Anthropic skills".to_string(),
+                Some(other) => format!("{} skills", other_titlecase(other)),
+                None => "Other skills".to_string(),
+            };
             LibraryRow {
                 id: id.clone(),
                 label: name.unwrap_or(id),
                 description: desc,
                 cells,
                 interactive: true,
+                group: Some(group_label),
             }
         })
         .collect();
@@ -3117,6 +3145,13 @@ pub fn list_cowork_skills_library() -> Result<Vec<LibraryRow>, String> {
     for row in &mut rows {
         compute_row_states(row, true);
     }
+    // Group Anthropic-shipped skills first, third-party next, unknown last.
+    rows.sort_by_key(|r| match r.group.as_deref() {
+        Some("Anthropic skills") => 0,
+        Some(g) if g.contains("User") => 2,
+        Some(_) => 1,
+        None => 9,
+    });
     Ok(rows)
 }
 
@@ -3172,14 +3207,22 @@ pub fn list_preferences_library() -> Result<Vec<LibraryRow>, String> {
             label: pref_label(key),
             description: Some(
                 if scope == "ui" {
-                    "UI setting (config.json)"
+                    "config.json"
                 } else {
-                    "Cowork preference"
+                    "claude_desktop_config.json"
                 }
                 .into(),
             ),
             cells,
             interactive: true,
+            group: Some(
+                if scope == "ui" {
+                    "UI settings"
+                } else {
+                    "Cowork preferences"
+                }
+                .into(),
+            ),
         });
     }
 
@@ -3621,6 +3664,7 @@ fn list_session_library(kind: SessionKind) -> Result<Vec<LibraryRow>, String> {
             ),
             cells,
             interactive: true,
+            group: Some("Workspace".into()),
         };
         compute_row_states(&mut summary, /* supports_symlink */ true);
         rows.push(summary);
@@ -3697,6 +3741,14 @@ fn list_session_library(kind: SessionKind) -> Result<Vec<LibraryRow>, String> {
             }
         };
 
+        // Per-cwd / per-process rows go under a content-aware bucket:
+        // Cowork agent → "Cowork agent runs"; Cowork-spawned worktree dirs
+        // → "Cowork worktrees"; real project cwds → "Projects".
+        let group_label = match kind {
+            SessionKind::CoworkAgent => "Cowork agent runs",
+            SessionKind::CodePanel if key.contains("/.claude/worktrees/") => "Cowork worktrees",
+            SessionKind::CodePanel => "Projects",
+        };
         let mut row = LibraryRow {
             id: key,
             label,
@@ -3708,10 +3760,21 @@ fn list_session_library(kind: SessionKind) -> Result<Vec<LibraryRow>, String> {
             // synthetic "Whole workspace" row to share, and clicks per-cwd
             // rows to inspect individual sessions in the DetailSheet.
             interactive: false,
+            group: Some(group_label.to_string()),
         };
         compute_row_states(&mut row, /* supports_symlink */ true);
         rows.push(row);
     }
+
+    // Sort so rows in the same group are contiguous. Stable, so within-group
+    // ordering (activity-descending from above) is preserved.
+    rows.sort_by_key(|r| match r.group.as_deref() {
+        Some("Workspace") => 0,
+        Some("Projects") => 1,
+        Some("Cowork worktrees") => 2,
+        Some("Cowork agent runs") => 3,
+        _ => 9,
+    });
 
     Ok(rows)
 }
@@ -5537,6 +5600,7 @@ mod tests {
                 make_cell("d", false, None, None),
             ],
             interactive: true,
+            group: None,
         };
         compute_row_states(&mut row, /* supports_symlink */ true);
         assert_eq!(row.cells[0].state, "shared");
@@ -5558,6 +5622,7 @@ mod tests {
                 make_cell("d", false, None, None),
             ],
             interactive: true,
+            group: None,
         };
         compute_row_states(&mut row, /* supports_symlink */ false);
         // a and b have the same digest, but c diverges — everybody present
@@ -5580,6 +5645,7 @@ mod tests {
                 make_cell("b", false, None, None),
             ],
             interactive: true,
+            group: None,
         };
         compute_row_states(&mut row, false);
         assert_eq!(row.cells[0].state, "independent");
@@ -5598,6 +5664,7 @@ mod tests {
                 make_cell("c", false, None, None),
             ],
             interactive: true,
+            group: None,
         };
         compute_row_states(&mut row, false);
         assert_eq!(row.cells[0].state, "copied");

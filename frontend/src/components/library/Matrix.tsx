@@ -75,36 +75,32 @@ export function Matrix({
   // Grid template: 280px for the label column, then equal-width for each profile.
   const gridTemplate = `280px repeat(${profiles.length}, minmax(72px, 1fr))`;
 
+  // Count rows in each group for the section-header meta line.
+  const groupCounts = useMemo(() => {
+    const m = new Map<string, number>();
+    for (const r of filtered) {
+      const g = r.group ?? "";
+      m.set(g, (m.get(g) ?? 0) + 1);
+    }
+    return m;
+  }, [filtered]);
+
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border bg-card">
-      {/* Search bar */}
-      <div className="flex items-center justify-between gap-3 border-b bg-muted/20 px-4 py-2.5">
-        <div className="font-sans text-[11px] text-muted-foreground">
-          <span className="font-mono tabular-nums">{filtered.length}</span>
-          <span className="opacity-50"> of </span>
-          <span className="font-mono tabular-nums">{rows.length}</span>
-          <span className="mx-2 opacity-30">·</span>
-          <span className="font-mono tabular-nums">{profiles.length}</span> profile
-          {profiles.length === 1 ? "" : "s"}
-        </div>
-        <div className="relative w-64">
-          <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
-          <Input
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Filter items"
-            className="h-7 pl-8 font-sans text-xs"
-          />
-        </div>
-      </div>
-
-      {/* Sticky column header */}
+      {/* Sticky column header. Filter input lives inside the Item cell —
+       *  one combined strip instead of an extra filter bar above. */}
       <div
         className="grid border-b bg-muted/30"
         style={{ gridTemplateColumns: gridTemplate }}
       >
-        <div className="border-r px-4 py-2 font-sans text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
-          Item
+        <div className="relative border-r px-3 py-2">
+          <Search className="pointer-events-none absolute left-5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder={`Filter ${rows.length} item${rows.length === 1 ? "" : "s"}`}
+            className="h-7 border-transparent bg-transparent pl-7 font-sans text-xs focus:bg-background focus:border-input"
+          />
         </div>
         {profiles.map((p, i) => {
           const summary = columnSummary[i];
@@ -157,22 +153,45 @@ export function Matrix({
           </div>
         ) : (
           <div className="stagger-children">
-            {filtered.map((row, rowIdx) => {
-              const isSelected = selectedRowId === row.id;
-              return (
-                <div
-                  key={row.id}
-                  className={cn(
-                    "grid items-stretch grid-divider transition-colors",
-                    isSelected
-                      ? "bg-accent/15"
-                      : "hover:bg-accent/8",
-                  )}
-                  style={{
-                    gridTemplateColumns: gridTemplate,
-                    animationDelay: `${Math.min(rowIdx * 12, 240)}ms`,
-                  }}
-                >
+            {(() => {
+              let lastGroup: string | null | undefined = undefined;
+              const out: React.ReactNode[] = [];
+              filtered.forEach((row, rowIdx) => {
+                const isSelected = selectedRowId === row.id;
+                // Insert a section header whenever the group flips.
+                if (row.group !== lastGroup) {
+                  lastGroup = row.group;
+                  if (row.group) {
+                    const count = groupCounts.get(row.group) ?? 0;
+                    out.push(
+                      <div
+                        key={`__group__${row.group}`}
+                        className="flex items-baseline justify-between gap-3 border-b bg-muted/30 px-4 py-1.5"
+                      >
+                        <h3 className="font-sans text-[10px] font-medium uppercase tracking-[0.16em] text-foreground/85">
+                          {row.group}
+                        </h3>
+                        <span className="font-mono text-[10px] tabular-nums text-muted-foreground/70">
+                          {count} {count === 1 ? "row" : "rows"}
+                        </span>
+                      </div>,
+                    );
+                  }
+                }
+                out.push(
+                  <div
+                    key={row.id}
+                    className={cn(
+                      "grid items-stretch grid-divider transition-colors",
+                      isSelected
+                        ? "bg-accent/15"
+                        : "hover:bg-accent/8",
+                    )}
+                    style={{
+                      gridTemplateColumns: gridTemplate,
+                      animationDelay: `${Math.min(rowIdx * 12, 240)}ms`,
+                    }}
+                  >
                   {/* Row label — `min-w-0` lets it respect the grid column
                    *  instead of expanding to its intrinsic content width.
                    *  `overflow-hidden` confines the truncate/line-clamp. */}
@@ -245,9 +264,11 @@ export function Matrix({
                       />
                     );
                   })}
-                </div>
-              );
-            })}
+                  </div>,
+                );
+              });
+              return out;
+            })()}
           </div>
         )}
       </div>

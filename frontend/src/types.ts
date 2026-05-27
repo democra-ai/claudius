@@ -232,6 +232,9 @@ export type LibraryRow = {
    *  Used for per-cwd Code/Cowork rows where the share unit is the
    *  workspace, not the individual project. */
   interactive: boolean;
+  /** Section bucket. Rows with the same group render under one bold
+   *  uppercase section header. */
+  group: string | null;
 };
 
 export type LocalSession = {
