@@ -11,7 +11,12 @@ import {
 import { ShareTable } from "@/components/share/ShareTable";
 import { HistoryTable } from "@/components/share/HistoryTable";
 import { CodeHistoryCard } from "@/components/share/CodeHistoryCard";
-import { ComingSoonPane } from "@/components/share/ComingSoonPane";
+import { McpServerTable } from "@/components/share/McpServerTable";
+import { CoworkSkillsTable } from "@/components/share/CoworkSkillsTable";
+import {
+  PreferencesTable,
+  rowKey as preferenceRowKey,
+} from "@/components/share/PreferencesTable";
 import { Card, CardContent } from "@/components/ui/card";
 import { api, isTauri } from "@/lib/api";
 import { useToasts } from "@/hooks/useToast";
@@ -20,8 +25,11 @@ import {
   type DesktopInstall,
   type CodeInstall,
   type PairCodeProjectShare,
+  type PairCoworkSkillsResult,
   type PairDesktopCodeHistory,
   type PairExtensionShare,
+  type PairMcpServerShare,
+  type PairPreferenceShare,
   type Profile,
   type ShareRow,
   profileKey,
@@ -74,6 +82,12 @@ export default function App() {
     useState<PairDesktopCodeHistory | null>(null);
   const [desktopCodeHistoryLoading, setDesktopCodeHistoryLoading] = useState(false);
   const [desktopCodeHistoryApplying, setDesktopCodeHistoryApplying] = useState(false);
+
+  const [mcpRows, setMcpRows] = useState<PairMcpServerShare[]>([]);
+  const [coworkSkills, setCoworkSkills] = useState<PairCoworkSkillsResult | null>(
+    null,
+  );
+  const [preferenceRows, setPreferenceRows] = useState<PairPreferenceShare[]>([]);
 
   const [pending, setPending] = useState<Map<string, boolean>>(new Map());
   const [search, setSearch] = useState("");
@@ -202,6 +216,58 @@ export default function App() {
     }
   }, [a, b, push]);
 
+  const loadMcpServers = useCallback(async () => {
+    if (!a || !b || a.category !== "desktop" || b.category !== "desktop") {
+      setMcpRows([]);
+      return;
+    }
+    setBusy(true);
+    try {
+      const rows = await api.listPairMcpSharing(a.data_dir, b.data_dir);
+      setMcpRows(rows);
+      setPending(new Map());
+    } catch (error) {
+      push(String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }, [a, b, push]);
+
+  const loadCoworkSkills = useCallback(async () => {
+    if (!a || !b || a.category !== "desktop" || b.category !== "desktop") {
+      setCoworkSkills(null);
+      return;
+    }
+    setBusy(true);
+    try {
+      const data = await api.listPairCoworkSkillsSharing(a.data_dir, b.data_dir);
+      setCoworkSkills(data);
+      setPending(new Map());
+    } catch (error) {
+      push(String(error), "error");
+      setCoworkSkills(null);
+    } finally {
+      setBusy(false);
+    }
+  }, [a, b, push]);
+
+  const loadPreferences = useCallback(async () => {
+    if (!a || !b || a.category !== "desktop" || b.category !== "desktop") {
+      setPreferenceRows([]);
+      return;
+    }
+    setBusy(true);
+    try {
+      const rows = await api.listPairPreferenceSharing(a.data_dir, b.data_dir);
+      setPreferenceRows(rows);
+      setPending(new Map());
+    } catch (error) {
+      push(String(error), "error");
+    } finally {
+      setBusy(false);
+    }
+  }, [a, b, push]);
+
   const loadHistory = useCallback(async () => {
     if (!a || !b || a.category !== "code" || b.category !== "code") {
       setHistoryRows([]);
@@ -246,7 +312,20 @@ export default function App() {
     if (activeKind === "extensions") loadExtensions();
     else if (activeKind === "history") loadHistory();
     else if (activeKind === "code_history") loadDesktopCodeHistory();
-  }, [a, b, activeKind, loadExtensions, loadHistory, loadDesktopCodeHistory]);
+    else if (activeKind === "mcp_servers") loadMcpServers();
+    else if (activeKind === "cowork_skills") loadCoworkSkills();
+    else if (activeKind === "preferences") loadPreferences();
+  }, [
+    a,
+    b,
+    activeKind,
+    loadExtensions,
+    loadHistory,
+    loadDesktopCodeHistory,
+    loadMcpServers,
+    loadCoworkSkills,
+    loadPreferences,
+  ]);
 
   const handleToggleDesktopCodeHistory = useCallback(
     async (nextShared: boolean) => {
@@ -314,6 +393,54 @@ export default function App() {
           "success",
         );
         await loadHistory();
+      } else if (activeKind === "mcp_servers" && a.category === "desktop") {
+        const changes = Array.from(pending.entries()).map(([name, copied]) => ({
+          name,
+          copied,
+        }));
+        const summary = await api.applyPairMcpSharing(
+          a.data_dir,
+          (b as Profile & { category: "desktop" }).data_dir,
+          changes,
+        );
+        push(
+          `Applied: ${summary.copied} change${summary.copied === 1 ? "" : "s"}, ${summary.skipped} skipped`,
+          "success",
+        );
+        await loadMcpServers();
+      } else if (activeKind === "cowork_skills" && a.category === "desktop") {
+        const changes = Array.from(pending.entries()).map(([skill_id, shared]) => ({
+          skill_id,
+          shared,
+        }));
+        const summary = await api.applyPairCoworkSkillsSharing(
+          a.data_dir,
+          (b as Profile & { category: "desktop" }).data_dir,
+          changes,
+        );
+        push(
+          `Applied: ${summary.copied} change${summary.copied === 1 ? "" : "s"}, ${summary.skipped} skipped`,
+          "success",
+        );
+        await loadCoworkSkills();
+      } else if (activeKind === "preferences" && a.category === "desktop") {
+        // Pending keys are namespaced `${scope}:${key}`. Split before sending.
+        const changes = Array.from(pending.entries()).map(([compound, copied]) => {
+          const colon = compound.indexOf(":");
+          const scope = compound.slice(0, colon) as "ui" | "desktop_pref";
+          const key = compound.slice(colon + 1);
+          return { scope, key, copied };
+        });
+        const summary = await api.applyPairPreferenceSharing(
+          a.data_dir,
+          (b as Profile & { category: "desktop" }).data_dir,
+          changes,
+        );
+        push(
+          `Applied: ${summary.copied} change${summary.copied === 1 ? "" : "s"}, ${summary.skipped} skipped`,
+          "success",
+        );
+        await loadPreferences();
       } else {
         push("Sharing for this category is not wired up yet.", "info");
       }
@@ -524,19 +651,40 @@ export default function App() {
                       onToggle={handleToggleDesktopCodeHistory}
                     />
                   ) : activeKind === "mcp_servers" ? (
-                    <ComingSoonPane
-                      title="MCP server sharing"
-                      description="List entries from claude_desktop_config.json (mcpServers) and let you tick which servers to share between profiles."
+                    <McpServerTable
+                      rows={mcpRows}
+                      pending={pending}
+                      search={search}
+                      setSearch={setSearch}
+                      onToggle={(row, next) =>
+                        handleToggle(row.id, row.shared, next)
+                      }
+                      columnA={profileLabel(a)}
+                      columnB={profileLabel(b)}
                     />
                   ) : activeKind === "cowork_skills" ? (
-                    <ComingSoonPane
-                      title="Cowork skills sharing"
-                      description="Compare skills under local-agent-mode-sessions/*/skills-plugin/ across profiles."
+                    <CoworkSkillsTable
+                      data={coworkSkills}
+                      pending={pending}
+                      search={search}
+                      setSearch={setSearch}
+                      onToggle={(row, next) =>
+                        handleToggle(row.id, row.shared, next)
+                      }
+                      columnA={profileLabel(a)}
+                      columnB={profileLabel(b)}
                     />
                   ) : (
-                    <ComingSoonPane
-                      title="Preferences sharing"
-                      description="Selectively share keys from config.json (theme, scale, window position) without touching account-bound preferences."
+                    <PreferencesTable
+                      rows={preferenceRows}
+                      pending={pending}
+                      search={search}
+                      setSearch={setSearch}
+                      onToggle={(row, next) =>
+                        handleToggle(preferenceRowKey(row), row.copied, next)
+                      }
+                      columnA={profileLabel(a)}
+                      columnB={profileLabel(b)}
                     />
                   )
                 ) : (

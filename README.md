@@ -337,6 +337,10 @@ npm install
 npm test
 ```
 
+## Acknowledgments
+
+The CLI core of this project started from [@jmdarre-v's `claude-multiprofile`](https://github.com/jmdarre-v/claude-multiprofile) — the wizard, registry, and macOS launcher generation are his work. This fork extends it with a Tauri desktop GUI and richer pair-sharing across profiles. Huge thanks for the clean base and MIT licensing that made building on top straightforward.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE).
