@@ -19,6 +19,7 @@ import { PendingBar } from "./PendingBar";
 
 const EMPTY_HINTS: Record<LibraryKind, string> = {
   code_history: "No Cowork code sessions yet in any profile.",
+  cowork_sessions: "No Cowork agent-mode sessions in any profile.",
   extensions: "No extensions installed in any profile.",
   mcp_servers: "No MCP servers configured in any claude_desktop_config.json.",
   cowork_skills: "No Cowork skills — open Cowork in any profile once.",
@@ -119,6 +120,7 @@ export default function ContentLibraryPage() {
     > = {};
     for (const kind of [
       "code_history",
+      "cowork_sessions",
       "extensions",
       "mcp_servers",
       "cowork_skills",
@@ -193,6 +195,7 @@ export default function ContentLibraryPage() {
   useEffect(() => {
     const others: LibraryKind[] = [
       "code_history",
+      "cowork_sessions",
       "extensions",
       "mcp_servers",
       "cowork_skills",
@@ -269,7 +272,14 @@ export default function ContentLibraryPage() {
       await loadKind(activeKind);
       // Also refresh counts so KindNav stays accurate.
       const others = (
-        ["code_history", "extensions", "mcp_servers", "cowork_skills", "preferences"] as LibraryKind[]
+        [
+          "code_history",
+          "cowork_sessions",
+          "extensions",
+          "mcp_servers",
+          "cowork_skills",
+          "preferences",
+        ] as LibraryKind[]
       ).filter((k) => k !== activeKind);
       for (const k of others) {
         api
@@ -328,7 +338,7 @@ export default function ContentLibraryPage() {
       }
       const row = rowsByKind[activeKind]?.find((r) => r.id === rowId);
       if (!row) return;
-      setSelection({ type: "row", row });
+      setSelection({ type: "row", row, kind: activeKind });
     },
     [rowsByKind, activeKind],
   );

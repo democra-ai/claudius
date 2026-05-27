@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import {
+  AtSign,
   Calendar,
   Database,
   Hammer,
@@ -12,6 +13,8 @@ import {
   Monitor,
   Network,
   Play,
+  Sparkles,
+  User,
   X,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -178,6 +181,24 @@ export function ProfileDetail({
         ) : (
           <>
             <Section title="Identity">
+              {stats.account_name ? (
+                <StatRow
+                  icon={User}
+                  label="Name"
+                  value={stats.account_name}
+                />
+              ) : null}
+              {stats.email_address ? (
+                <StatRow
+                  icon={AtSign}
+                  label="Email"
+                  value={
+                    <span className="font-mono text-[11px]">
+                      {stats.email_address}
+                    </span>
+                  }
+                />
+              ) : null}
               <StatRow
                 icon={Hash}
                 label="Account"
@@ -205,11 +226,17 @@ export function ProfileDetail({
               />
             </Section>
 
-            <Section title="Code activity">
+            <Section title="Local activity">
               <StatRow
                 icon={MessagesSquare}
-                label="Sessions"
+                label="Code sessions"
                 value={stats.code_session_count.toLocaleString()}
+                mono
+              />
+              <StatRow
+                icon={Sparkles}
+                label="Cowork sessions"
+                value={stats.cowork_session_count.toLocaleString()}
                 mono
               />
               <StatRow

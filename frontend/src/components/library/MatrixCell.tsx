@@ -10,6 +10,8 @@ interface MatrixCellProps {
   /** Map of `${rowId}:${install_id}` → desired-present (only when toggled). */
   pending: Map<string, boolean>;
   onToggle: (rowId: string, installId: string, nextPresent: boolean) => void;
+  /** Non-interactive cells render dimmer and don't stage a pending toggle. */
+  interactive?: boolean;
 }
 
 /** Predicted post-toggle state of the cell. Used to render the pending glyph
@@ -25,20 +27,30 @@ function predictedState(
   return nextPresent ? "independent" : "absent";
 }
 
-export function MatrixCell({ cell, rowId, pending, onToggle }: MatrixCellProps) {
+export function MatrixCell({
+  cell,
+  rowId,
+  pending,
+  onToggle,
+  interactive = true,
+}: MatrixCellProps) {
   const pendingKey = `${rowId}:${cell.install_id}`;
   const desired = pending.get(pendingKey);
-  const isPending = desired !== undefined;
-  const effectiveState = predictedState(cell, desired);
+  const isPending = interactive && desired !== undefined;
+  const effectiveState = interactive
+    ? predictedState(cell, desired)
+    : cell.state;
 
   const tooltip = useMemo(() => {
-    const lines = [
-      `${cell.install_name}`,
-      STATE_LABEL[effectiveState] + (isPending ? " · pending" : ""),
-    ];
+    const lines: string[] = [cell.install_name];
+    const stateLine =
+      STATE_LABEL[effectiveState] +
+      (isPending ? " · pending" : "") +
+      (!interactive ? " · browse only" : "");
+    lines.push(stateLine);
     if (cell.detail) lines.push(cell.detail);
     return lines.join(" — ");
-  }, [cell, effectiveState, isPending]);
+  }, [cell, effectiveState, isPending, interactive]);
 
   return (
     <Tooltip>
@@ -48,9 +60,10 @@ export function MatrixCell({ cell, rowId, pending, onToggle }: MatrixCellProps) 
             onToggle(rowId, cell.install_id, !cell.present /* desired */)
           }
           className={cn(
-            "flex h-9 w-full items-center justify-center transition-colors",
-            "hover:bg-accent/10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-            isPending && "bg-amber-500/8 ring-1 ring-inset ring-amber-500/30",
+            "flex h-10 w-full items-center justify-center transition-colors",
+            "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+            interactive ? "hover:bg-primary/8" : "hover:bg-muted/40 cursor-default",
+            isPending && "bg-amber-500/10 ring-1 ring-inset ring-amber-500/30",
             cell.kind === "default" && "bg-muted/30",
           )}
           aria-label={tooltip}

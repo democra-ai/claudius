@@ -1,4 +1,4 @@
-import { Blocks, Boxes, Hammer, MessagesSquare, Settings2 } from "lucide-react";
+import { Blocks, Boxes, Hammer, MessagesSquare, Sparkles, Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { LibraryKind, LibraryRow } from "@/types";
 
@@ -13,9 +13,15 @@ type KindDef = {
 const KINDS: KindDef[] = [
   {
     value: "code_history",
-    label: "Code history",
+    label: "Code sessions",
     icon: MessagesSquare,
-    blurb: "Cowork chat sessions",
+    blurb: "Cowork chat panel",
+  },
+  {
+    value: "cowork_sessions",
+    label: "Cowork sessions",
+    icon: Sparkles,
+    blurb: "Agent mode runs",
   },
   {
     value: "extensions",

@@ -223,6 +223,22 @@ export type LibraryRow = {
   label: string;
   description: string | null;
   cells: LibraryCell[];
+  /** When false, clicking a cell shouldn't stage a toggle — browse-only.
+   *  Used for per-cwd Code/Cowork rows where the share unit is the
+   *  workspace, not the individual project. */
+  interactive: boolean;
+};
+
+export type LocalSession = {
+  session_id: string;
+  title: string | null;
+  cwd: string | null;
+  process_name: string | null;
+  model: string | null;
+  created_at_ms: number;
+  last_activity_ms: number;
+  account_name: string | null;
+  email_address: string | null;
 };
 
 export type LibraryCellChange = {
@@ -234,6 +250,7 @@ export type LibraryCellChange = {
 
 export type LibraryKind =
   | "code_history"
+  | "cowork_sessions"
   | "extensions"
   | "mcp_servers"
   | "cowork_skills"
@@ -250,12 +267,17 @@ export type ProfileStats = {
   data_dir: string;
   account_id: string | null;
   org_id: string | null;
+  /** Display name from any Cowork agent-mode session file. */
+  account_name: string | null;
+  /** Email — same source. Profiles that haven't used Cowork yet won't have it. */
+  email_address: string | null;
   disk_bytes: number | null;
   created_at_ms: number | null;
   last_activity_ms: number | null;
   code_session_count: number;
   code_total_bytes: number;
   code_recent_cwds: string[];
+  cowork_session_count: number;
   extension_count: number;
   mcp_server_count: number;
   cowork_skill_count: number;

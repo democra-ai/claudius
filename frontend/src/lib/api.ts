@@ -7,6 +7,7 @@ import type {
   LibraryCellChange,
   LibraryKind,
   LibraryRow,
+  LocalSession,
   ProfileStats,
   PairCodeProjectShare,
   PairCodeShareChange,
@@ -194,6 +195,8 @@ export const api = {
     const command =
       kind === "code_history"
         ? "list_library_code_history"
+        : kind === "cowork_sessions"
+        ? "list_library_cowork_sessions"
         : kind === "extensions"
         ? "list_library_extensions"
         : kind === "mcp_servers"
@@ -202,6 +205,18 @@ export const api = {
         ? "list_library_cowork_skills"
         : "list_library_preferences";
     return invoke(command);
+  },
+
+  listSessionsForProject(
+    installId: string,
+    rowId: string,
+    isCowork: boolean,
+  ): Promise<LocalSession[]> {
+    return invoke("list_sessions_for_project", {
+      installId,
+      rowId,
+      isCowork,
+    });
   },
 
   applyLibraryChanges(
