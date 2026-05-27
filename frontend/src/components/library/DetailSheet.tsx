@@ -1,11 +1,18 @@
-import { X } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Loader2, X } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { DesktopInstall, LibraryRow } from "@/types";
+import { api } from "@/lib/api";
+import type {
+  DesktopInstall,
+  LibraryKind,
+  LibraryRow,
+  LocalSession,
+} from "@/types";
 import { Glyph, STATE_LABEL } from "./Glyph";
 import { ProfileDetail } from "./ProfileDetail";
 
 export type Selection =
-  | { type: "row"; row: LibraryRow }
+  | { type: "row"; row: LibraryRow; kind: LibraryKind }
   | { type: "profile"; install: DesktopInstall }
   | null;
 
@@ -45,6 +52,7 @@ export function DetailSheet({
       ) : selection?.type === "row" ? (
         <RowDetail
           row={selection.row}
+          kind={selection.kind}
           onClose={onClose}
           resolveInstallName={resolveInstallName}
         />
@@ -53,15 +61,105 @@ export function DetailSheet({
   );
 }
 
+function formatRelative(ms: number): string {
+  const delta = Math.max(0, Date.now() - ms);
+  const s = Math.floor(delta / 1000);
+  if (s < 60) return `${s}s ago`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ago`;
+  if (s < 86400) return `${Math.floor(s / 3600)}h ago`;
+  if (s < 86400 * 30) return `${Math.floor(s / 86400)}d ago`;
+  return `${Math.floor(s / (86400 * 30))}mo ago`;
+}
+
+function SessionList({
+  installId,
+  installName,
+  rowId,
+  isCowork,
+}: {
+  installId: string;
+  installName: string;
+  rowId: string;
+  isCowork: boolean;
+}) {
+  const [sessions, setSessions] = useState<LocalSession[] | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    api
+      .listSessionsForProject(installId, rowId, isCowork)
+      .then((s) => {
+        if (alive) setSessions(s);
+      })
+      .catch(() => {
+        if (alive) setSessions([]);
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [installId, rowId, isCowork]);
+
+  if (loading) {
+    return (
+      <div className="flex items-center gap-1.5 px-1 py-2 text-muted-foreground">
+        <Loader2 className="h-3 w-3 animate-spin" />
+        <span className="font-sans text-[10px]">Loading sessions…</span>
+      </div>
+    );
+  }
+  if (!sessions || sessions.length === 0) {
+    return (
+      <div className="px-1 py-2 font-sans text-[10px] text-muted-foreground/70">
+        No sessions in {installName}.
+      </div>
+    );
+  }
+  return (
+    <ul className="mt-1 space-y-1">
+      {sessions.slice(0, 12).map((s) => (
+        <li key={s.session_id} className="rounded-md bg-background/60 px-2 py-1.5">
+          <div className="line-clamp-2 font-sans text-[11px] text-foreground/90">
+            {s.title || (
+              <span className="italic text-muted-foreground">Untitled</span>
+            )}
+          </div>
+          <div className="mt-0.5 flex flex-wrap gap-x-2 font-mono text-[9px] text-muted-foreground/70">
+            {s.last_activity_ms ? (
+              <span>{formatRelative(s.last_activity_ms)}</span>
+            ) : null}
+            {s.model ? <span>{s.model.replace(/\[.*\]$/, "")}</span> : null}
+          </div>
+        </li>
+      ))}
+      {sessions.length > 12 ? (
+        <li className="px-1 py-1 font-sans text-[10px] text-muted-foreground/70">
+          +{sessions.length - 12} more…
+        </li>
+      ) : null}
+    </ul>
+  );
+}
+
 function RowDetail({
   row,
+  kind,
   onClose,
   resolveInstallName,
 }: {
   row: LibraryRow;
+  kind: LibraryKind;
   onClose: () => void;
   resolveInstallName: (installId: string) => string | undefined;
 }) {
+  const showSessions =
+    (kind === "code_history" || kind === "cowork_sessions") &&
+    row.id !== "__workspace__";
+  const isCowork = kind === "cowork_sessions";
   return (
     <div className="sheet-slide flex h-full flex-col">
       <header className="flex items-start justify-between gap-2 border-b px-4 py-3">
@@ -111,7 +209,7 @@ function RowDetail({
                 </span>
               </div>
               {cell.detail ? (
-                <div className="break-words font-mono text-[11px] text-foreground/80">
+                <div className="break-words font-sans text-[11px] text-foreground/80">
                   {cell.detail}
                 </div>
               ) : (
@@ -126,6 +224,16 @@ function RowDetail({
                     <span>link:{cell.link_target_digest.slice(0, 8)}</span>
                   ) : null}
                 </div>
+              ) : null}
+              {showSessions && cell.present ? (
+                <SessionList
+                  installId={cell.install_id}
+                  installName={
+                    resolveInstallName(cell.install_id) ?? cell.install_name
+                  }
+                  rowId={row.id}
+                  isCowork={isCowork}
+                />
               ) : null}
             </li>
           ))}

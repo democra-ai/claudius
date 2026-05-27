@@ -223,7 +223,16 @@ export function Matrix({
                         cell={cell}
                         rowId={row.id}
                         pending={pending}
-                        onToggle={onCellToggle}
+                        interactive={row.interactive}
+                        onToggle={(rowId, installId, nextPresent) => {
+                          if (row.interactive) {
+                            onCellToggle(rowId, installId, nextPresent);
+                          } else {
+                            // Browse-only rows: cell click opens detail
+                            // for that row instead of staging a toggle.
+                            onRowSelect(rowId);
+                          }
+                        }}
                       />
                     );
                   })}

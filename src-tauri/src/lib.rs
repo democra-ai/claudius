@@ -2697,6 +2697,17 @@ pub struct LibraryRow {
     pub label: String,
     pub description: Option<String>,
     pub cells: Vec<LibraryCell>,
+    /// When false, cell clicks shouldn't stage a pending toggle — the row
+    /// is browse-only. We use this for per-cwd Code/Cowork rows where the
+    /// sharing unit is actually the parent workspace, not the individual
+    /// project. Defaults to true.
+    #[serde(default = "default_true")]
+    pub interactive: bool,
+}
+
+#[allow(dead_code)]
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -2875,6 +2886,7 @@ pub fn list_extensions_library_grid() -> Result<Vec<LibraryRow>, String> {
                 label: id,
                 description: None,
                 cells,
+                interactive: true,
             }
         })
         .collect();
@@ -2932,6 +2944,7 @@ pub fn list_mcp_library() -> Result<Vec<LibraryRow>, String> {
                 label: name,
                 description: None,
                 cells,
+                interactive: true,
             }
         })
         .collect();
@@ -3017,6 +3030,7 @@ pub fn list_cowork_skills_library() -> Result<Vec<LibraryRow>, String> {
                 label: name.unwrap_or(id),
                 description: desc,
                 cells,
+                interactive: true,
             }
         })
         .collect();
@@ -3086,6 +3100,7 @@ pub fn list_preferences_library() -> Result<Vec<LibraryRow>, String> {
                 .into(),
             ),
             cells,
+            interactive: true,
         });
     }
 
@@ -3126,6 +3141,7 @@ pub fn apply_library_change(
             "cowork_skills" => list_cowork_skills_library()?,
             "preferences" => list_preferences_library()?,
             "code_history" => list_code_history_library()?,
+            "cowork_sessions" => list_cowork_sessions_library()?,
             _ => return Err(format!("Unknown library kind: {kind}")),
         };
         let row = rows
@@ -3194,13 +3210,26 @@ pub fn apply_library_change(
             set_pair_preference_copied(&source_dir, &target_dir, key, scope, change.wants)
         }
         "code_history" => {
-            // Single workspace per profile — share or unshare against source.
+            // Only the synthetic "__workspace__" row toggles the symlink —
+            // per-cwd rows are browse-only and the frontend won't send them.
+            if change.row_id != "__workspace__" {
+                return Err(
+                    "Per-project Code History rows are browse-only — toggle the “Whole workspace” row to share."
+                        .into(),
+                );
+            }
             let summary = apply_pair_desktop_code_history(
                 source.data_dir.clone(),
                 target.data_dir.clone(),
                 PairDesktopCodeHistoryChange { shared: change.wants },
             )?;
             Ok(summary.copied > 0)
+        }
+        "cowork_sessions" => {
+            // Cowork agent-mode sessions aren't share-toggleable today — they
+            // bind to the account at sub-directory level rather than a clean
+            // symlink boundary. v1 keeps them strictly informational.
+            Err("Cowork sessions are read-only in this version.".into())
         }
         other => Err(format!("Unknown library kind: {other}")),
     }
@@ -3222,80 +3251,388 @@ pub fn apply_library_changes(
     Ok(CopySummary { copied, skipped })
 }
 
-// ----- Code History library (1-row matrix view) -----
+// ----- Local session scanning -----
 //
-// Unlike per-item kinds, Code History is workspace-level: each Desktop
-// profile has exactly one current workspace
+// Two storage trees hold per-conversation JSON files:
+//
+//   claude-code-sessions/<acct>/<org>/local_*.json    — Cowork "Code" panel
+//   local-agent-mode-sessions/<acct>/<group>/local_*.json — Cowork agent mode
+//
+// Both files are flat JSON with the same surface: sessionId, cwd, title,
+// model, createdAt, lastActivityAt, (sometimes) accountName/emailAddress.
+// Parsing them gives the user a real-content view ("Investigate storage
+// full issue · Opus 4.7 · 2h ago") instead of just aggregate counts.
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct LocalSession {
+    pub session_id: String,
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    /// Cowork agent mode uses a VM "processName" instead of a real cwd.
+    pub process_name: Option<String>,
+    pub model: Option<String>,
+    pub created_at_ms: i64,
+    pub last_activity_ms: i64,
+    /// Surfaced from Cowork agent-mode session files when available — the
+    /// only way to see the human-readable account on this profile without
+    /// reading Local Storage / IndexedDB. Code-panel sessions don't carry it.
+    pub account_name: Option<String>,
+    pub email_address: Option<String>,
+}
+
+/// Read only the fields we care about — sessions can be hundreds of KB
+/// because of systemPrompt + initialMessage, so streaming-parse + early-pick
+/// would be ideal, but serde_json::Value is plenty fast at this scale (<200
+/// files, <2MB total in practice).
+fn parse_local_session(path: &Path) -> Option<LocalSession> {
+    let raw = fs::read_to_string(path).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let session_id = v.get("sessionId").and_then(|x| x.as_str())?.to_string();
+    let created = v
+        .get("createdAt")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(0);
+    let last = v
+        .get("lastActivityAt")
+        .and_then(|x| x.as_i64())
+        .unwrap_or(created);
+    Some(LocalSession {
+        session_id,
+        title: v.get("title").and_then(|x| x.as_str()).map(String::from),
+        cwd: v.get("cwd").and_then(|x| x.as_str()).map(String::from),
+        process_name: v
+            .get("processName")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+        model: v.get("model").and_then(|x| x.as_str()).map(String::from),
+        created_at_ms: created,
+        last_activity_ms: last,
+        account_name: v
+            .get("accountName")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+        email_address: v
+            .get("emailAddress")
+            .and_then(|x| x.as_str())
+            .map(String::from),
+    })
+}
+
+/// Walk every `local_*.json` under `root`, return parsed sessions.
+fn scan_sessions_under(root: &Path) -> Vec<LocalSession> {
+    let mut out = Vec::new();
+    if let Ok(walker) = fs::read_dir(root) {
+        for outer in walker.flatten() {
+            let outer_path = outer.path();
+            if !outer_path.is_dir() {
+                continue;
+            }
+            // Skip skills-plugin/ — that's manifest+skills, not sessions.
+            if outer_path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(|s| s == "skills-plugin")
+                .unwrap_or(false)
+            {
+                continue;
+            }
+            if let Ok(mid) = fs::read_dir(&outer_path) {
+                for mid_e in mid.flatten() {
+                    let mid_path = mid_e.path();
+                    if !mid_path.is_dir() {
+                        continue;
+                    }
+                    // Scan one level deeper for local_*.json
+                    if let Ok(leaf) = fs::read_dir(&mid_path) {
+                        for f in leaf.flatten() {
+                            let p = f.path();
+                            if p.file_name()
+                                .and_then(|n| n.to_str())
+                                .map(|s| s.starts_with("local_") && s.ends_with(".json"))
+                                .unwrap_or(false)
+                            {
+                                if let Some(session) = parse_local_session(&p) {
+                                    out.push(session);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+fn code_sessions_root(data_dir: &Path) -> PathBuf {
+    data_dir.join(DESKTOP_CODE_SESSIONS_DIR)
+}
+
+fn cowork_sessions_root(data_dir: &Path) -> PathBuf {
+    data_dir.join("local-agent-mode-sessions")
+}
+
+/// One scan, one cell. Encapsulates the per-profile aggregate for a given
+/// row (cwd or processName).
+fn build_session_cell(
+    install: &DesktopInstall,
+    sessions: &[LocalSession],
+    link_target_digest: Option<String>,
+) -> LibraryCell {
+    let n = sessions.len();
+    let last_activity = sessions.iter().map(|s| s.last_activity_ms).max().unwrap_or(0);
+    let best_title = sessions
+        .iter()
+        .max_by_key(|s| s.last_activity_ms)
+        .and_then(|s| s.title.clone());
+    let detail = if n == 0 {
+        None
+    } else {
+        let mut parts: Vec<String> = vec![format!(
+            "{n} session{}",
+            if n == 1 { "" } else { "s" }
+        )];
+        if let Some(t) = best_title {
+            let trimmed = if t.len() > 36 { format!("{}…", &t[..35]) } else { t };
+            parts.push(format!("“{trimmed}”"));
+        }
+        if last_activity > 0 {
+            parts.push(humanize_ago(last_activity));
+        }
+        Some(parts.join(" · "))
+    };
+    LibraryCell {
+        install_id: install.id.clone(),
+        install_name: install.name.clone(),
+        data_dir: install.data_dir.clone(),
+        kind: install.kind.clone(),
+        state: String::new(),
+        present: n > 0,
+        detail,
+        // The "digest" we set here represents how many sessions exist (so
+        // identical session counts across profiles look "copied"). Probably
+        // not what we want — keep it None and let the symlink decide.
+        digest: None,
+        link_target_digest,
+    }
+}
+
+// ----- Code History library — per-cwd matrix view -----
+//
+// Each Desktop profile has exactly one current workspace
 // (`claude-code-sessions/<accountId>/<orgId>/`) and the share unit is
 // "this profile's workspace IS that profile's workspace" via symlink.
-// To fit into the matrix shell we render it as a single fat row where
-// each cell carries rich detail (session count, last activity, top cwd)
-// and the link_target_digest groups profiles into shared workspaces.
+// But the user thinks in *projects*, not workspaces — they want to know
+// where they worked on `democra-ai`, where on `OpenAdvisor`. So we
+// explode the workspace into one row per unique cwd, plus a leading
+// "Workspace" row that carries the symlink-share state for the whole.
 
 pub fn list_code_history_library() -> Result<Vec<LibraryRow>, String> {
+    list_session_library(SessionKind::CodePanel)
+}
+
+pub fn list_cowork_sessions_library() -> Result<Vec<LibraryRow>, String> {
+    list_session_library(SessionKind::CoworkAgent)
+}
+
+#[derive(Clone, Copy)]
+enum SessionKind {
+    CodePanel,
+    CoworkAgent,
+}
+
+fn list_session_library(kind: SessionKind) -> Result<Vec<LibraryRow>, String> {
     let installs = list_desktop_installs()?;
-    let cells: Vec<LibraryCell> = installs
-        .into_iter()
-        .map(|install| {
-            let data_dir = PathBuf::from(&install.data_dir);
-            let sessions_root = desktop_code_sessions_path(&data_dir);
-            let stat = scan_desktop_code_history_with_data_dir(&data_dir, &sessions_root)
-                .unwrap_or_default();
-            let primary_path = stat
-                .primary_workspace
-                .as_ref()
-                .map(|ws| desktop_code_workspace_path(&data_dir, ws));
-            let link_d = primary_path.as_deref().and_then(symlink_target_digest);
-            let detail = if stat.present {
-                let cwd = stat.recent_cwds.first().map(|s| {
-                    let trimmed = s.replace(&std::env::var("HOME").unwrap_or_default(), "~");
-                    if trimmed.len() > 28 {
-                        format!("…{}", &trimmed[trimmed.len() - 27..])
-                    } else {
-                        trimmed
-                    }
-                });
-                let ago = if stat.last_activity_ms > 0 {
-                    Some(humanize_ago(stat.last_activity_ms))
+    let mut per_install: Vec<(DesktopInstall, Vec<LocalSession>, Option<String>)> =
+        Vec::with_capacity(installs.len());
+
+    for install in installs {
+        let data_dir = PathBuf::from(&install.data_dir);
+        let root = match kind {
+            SessionKind::CodePanel => code_sessions_root(&data_dir),
+            SessionKind::CoworkAgent => cowork_sessions_root(&data_dir),
+        };
+        let sessions = scan_sessions_under(&root);
+
+        // Workspace symlink digest — shared with the existing code-history
+        // sharing logic. Only meaningful for the code panel; cowork agent
+        // mode is per-account, not per-workspace.
+        let link_d = match kind {
+            SessionKind::CodePanel => {
+                let ws = read_workspace_identity(&data_dir).unwrap_or(None);
+                ws.as_ref()
+                    .map(|w| desktop_code_workspace_path(&data_dir, w))
+                    .as_deref()
+                    .and_then(symlink_target_digest)
+            }
+            SessionKind::CoworkAgent => None,
+        };
+        per_install.push((install, sessions, link_d));
+    }
+
+    // Group by "project key" — for code-panel that's `cwd`, for cowork
+    // agent that's `processName` (the VM name).
+    fn project_key(s: &LocalSession, kind: SessionKind) -> Option<String> {
+        match kind {
+            SessionKind::CodePanel => s.cwd.clone(),
+            SessionKind::CoworkAgent => s.process_name.clone().or_else(|| s.cwd.clone()),
+        }
+    }
+
+    let mut all_keys: BTreeMap<String, ()> = BTreeMap::new();
+    for (_, sessions, _) in &per_install {
+        for s in sessions {
+            if let Some(k) = project_key(s, kind) {
+                all_keys.insert(k, ());
+            }
+        }
+    }
+
+    // Sort keys by most-recent activity across all profiles (descending).
+    let mut keys: Vec<String> = all_keys.into_keys().collect();
+    keys.sort_by_key(|k| {
+        let mut latest = 0_i64;
+        for (_, sessions, _) in &per_install {
+            for s in sessions {
+                if project_key(s, kind).as_deref() == Some(k.as_str()) {
+                    latest = latest.max(s.last_activity_ms);
+                }
+            }
+        }
+        -latest // descending
+    });
+
+    let mut rows: Vec<LibraryRow> = Vec::with_capacity(keys.len() + 1);
+
+    // Synthetic top row — workspace-level summary, lets the user toggle
+    // the symlink share for the *whole* workspace at once.
+    if matches!(kind, SessionKind::CodePanel) {
+        let cells: Vec<LibraryCell> = per_install
+            .iter()
+            .map(|(install, sessions, link_d)| {
+                let n = sessions.len();
+                let last = sessions.iter().map(|s| s.last_activity_ms).max().unwrap_or(0);
+                let detail = if n > 0 {
+                    Some(format!(
+                        "{n} session{} · {}",
+                        if n == 1 { "" } else { "s" },
+                        if last > 0 { humanize_ago(last) } else { "—".into() }
+                    ))
                 } else {
                     None
                 };
-                let parts: Vec<String> = [
-                    Some(format!("{} sessions", stat.session_count)),
-                    cwd,
-                    ago,
-                ]
-                .into_iter()
-                .flatten()
-                .collect();
-                Some(parts.join(" · "))
+                LibraryCell {
+                    install_id: install.id.clone(),
+                    install_name: install.name.clone(),
+                    data_dir: install.data_dir.clone(),
+                    kind: install.kind.clone(),
+                    state: String::new(),
+                    present: n > 0,
+                    detail,
+                    digest: None,
+                    link_target_digest: link_d.clone(),
+                }
+            })
+            .collect();
+        let mut summary = LibraryRow {
+            id: "__workspace__".into(),
+            label: "Whole workspace".into(),
+            description: Some(
+                "Toggle to symlink the entire `claude-code-sessions/` workspace between profiles.".into(),
+            ),
+            cells,
+            interactive: true,
+        };
+        compute_row_states(&mut summary, /* supports_symlink */ true);
+        rows.push(summary);
+    }
+
+    // One row per cwd / processName.
+    for key in keys {
+        let cells: Vec<LibraryCell> = per_install
+            .iter()
+            .map(|(install, sessions, link_d)| {
+                let matching: Vec<&LocalSession> = sessions
+                    .iter()
+                    .filter(|s| project_key(s, kind).as_deref() == Some(key.as_str()))
+                    .collect();
+                let matching_owned: Vec<LocalSession> =
+                    matching.iter().map(|s| (*s).clone()).collect();
+                build_session_cell(install, &matching_owned, link_d.clone())
+            })
+            .collect();
+
+        // Pretty label: basename for cwd, processName as-is.
+        let label = match kind {
+            SessionKind::CodePanel => {
+                let p = Path::new(&key);
+                p.file_name()
+                    .and_then(|n| n.to_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| key.clone())
+            }
+            SessionKind::CoworkAgent => key.clone(),
+        };
+        let description = match kind {
+            SessionKind::CodePanel => Some(
+                key.replace(&std::env::var("HOME").unwrap_or_default(), "~"),
+            ),
+            SessionKind::CoworkAgent => Some("Cowork VM".into()),
+        };
+
+        let mut row = LibraryRow {
+            id: key,
+            label,
+            description,
+            cells,
+            // Per-cwd / per-process rows are browse-only — toggling them
+            // wouldn't share just *one* cwd's sessions, because sessions
+            // live as a workspace-bundled symlink. The user uses the
+            // synthetic "Whole workspace" row to share, and clicks per-cwd
+            // rows to inspect individual sessions in the DetailSheet.
+            interactive: false,
+        };
+        compute_row_states(&mut row, /* supports_symlink */ true);
+        rows.push(row);
+    }
+
+    Ok(rows)
+}
+
+/// Read individual sessions matching a project key from a given install.
+/// Used by the DetailSheet to enumerate "what conversations happened here?"
+pub fn list_sessions_for_project(
+    install_id: String,
+    row_id: String,
+    is_cowork: bool,
+) -> Result<Vec<LocalSession>, String> {
+    let installs = list_desktop_installs()?;
+    let install = installs
+        .iter()
+        .find(|i| i.id == install_id)
+        .ok_or_else(|| format!("Profile {install_id} not found"))?;
+    let data_dir = PathBuf::from(&install.data_dir);
+    let root = if is_cowork {
+        cowork_sessions_root(&data_dir)
+    } else {
+        code_sessions_root(&data_dir)
+    };
+    let sessions = scan_sessions_under(&root);
+    let mut filtered: Vec<LocalSession> = sessions
+        .into_iter()
+        .filter(|s| {
+            if row_id == "__workspace__" {
+                true
+            } else if is_cowork {
+                s.process_name.as_deref() == Some(row_id.as_str())
+                    || s.cwd.as_deref() == Some(row_id.as_str())
             } else {
-                None
-            };
-            LibraryCell {
-                install_id: install.id.clone(),
-                install_name: install.name.clone(),
-                data_dir: install.data_dir.clone(),
-                kind: install.kind.clone(),
-                state: String::new(),
-                present: stat.present,
-                detail,
-                digest: None,
-                link_target_digest: link_d,
+                s.cwd.as_deref() == Some(row_id.as_str())
             }
         })
         .collect();
-    let mut row = LibraryRow {
-        id: "workspace".into(),
-        label: "Cowork code workspace".into(),
-        description: Some(
-            "One per Desktop profile — symlink to share session history live."
-                .into(),
-        ),
-        cells,
-    };
-    compute_row_states(&mut row, /* supports_symlink */ true);
-    Ok(vec![row])
+    filtered.sort_by_key(|s| -s.last_activity_ms);
+    Ok(filtered)
 }
 
 /// "5m ago", "2h ago", "3d ago" — concise relative time for densely-packed
@@ -3328,6 +3665,12 @@ pub struct ProfileStats {
     pub data_dir: String,
     pub account_id: Option<String>,
     pub org_id: Option<String>,
+    /// Human-readable display name surfaced from any Cowork agent-mode
+    /// session file (the only on-disk source that carries it). None if
+    /// the user has never used Cowork agent mode in this profile.
+    pub account_name: Option<String>,
+    /// Email address — same source as account_name.
+    pub email_address: Option<String>,
     /// Bytes-on-disk of the data directory. Computed via `du -sk` (fast).
     pub disk_bytes: Option<u64>,
     /// Unix millis — when the data dir was first created (mtime of the dir).
@@ -3338,6 +3681,8 @@ pub struct ProfileStats {
     pub code_session_count: u32,
     pub code_total_bytes: u64,
     pub code_recent_cwds: Vec<String>,
+    /// Cowork agent-mode session count (from `local-agent-mode-sessions/`).
+    pub cowork_session_count: u32,
     /// Number of installed Desktop extensions.
     pub extension_count: u32,
     /// Number of MCP servers in claude_desktop_config.json.
@@ -3392,6 +3737,23 @@ pub fn get_profile_stats(install_id: String) -> Result<ProfileStats, String> {
     )
     .unwrap_or_default();
 
+    // Cowork agent-mode sessions — the only on-disk source for the user's
+    // display name and email. We scan all sessions and pick the most
+    // recently-active one's identity (most likely to reflect the live login).
+    let cowork_sessions = scan_sessions_under(&cowork_sessions_root(&data_dir));
+    let mut cowork_sorted = cowork_sessions.clone();
+    cowork_sorted.sort_by_key(|s| -s.last_activity_ms);
+    let (account_name, email_address) = cowork_sorted
+        .iter()
+        .find_map(|s| {
+            if s.account_name.is_some() || s.email_address.is_some() {
+                Some((s.account_name.clone(), s.email_address.clone()))
+            } else {
+                None
+            }
+        })
+        .unwrap_or((None, None));
+
     let extensions = list_extensions_in_dir(&data_dir).unwrap_or_default();
     let config = read_desktop_config(&data_dir).unwrap_or(serde_json::json!({}));
     let mcp_count = mcp_servers_obj(&config).map(|m| m.len()).unwrap_or(0);
@@ -3441,6 +3803,8 @@ pub fn get_profile_stats(install_id: String) -> Result<ProfileStats, String> {
         data_dir: install.data_dir.clone(),
         account_id,
         org_id,
+        account_name,
+        email_address,
         disk_bytes: dir_disk_bytes(&data_dir),
         created_at_ms: dir_created_ms(&data_dir),
         last_activity_ms: if stat.last_activity_ms > 0 {
@@ -3451,6 +3815,7 @@ pub fn get_profile_stats(install_id: String) -> Result<ProfileStats, String> {
         code_session_count: stat.session_count,
         code_total_bytes: stat.total_bytes,
         code_recent_cwds: stat.recent_cwds,
+        cowork_session_count: cowork_sessions.len() as u32,
         extension_count: extensions.len() as u32,
         mcp_server_count: mcp_count as u32,
         cowork_skill_count: cowork_skills as u32,
@@ -3655,6 +4020,20 @@ mod commands {
     }
 
     #[tauri::command]
+    pub fn list_library_cowork_sessions() -> Result<Vec<LibraryRow>, String> {
+        super::list_cowork_sessions_library()
+    }
+
+    #[tauri::command]
+    pub fn list_sessions_for_project(
+        install_id: String,
+        row_id: String,
+        is_cowork: bool,
+    ) -> Result<Vec<LocalSession>, String> {
+        super::list_sessions_for_project(install_id, row_id, is_cowork)
+    }
+
+    #[tauri::command]
     pub fn get_profile_stats(install_id: String) -> Result<ProfileStats, String> {
         super::get_profile_stats(install_id)
     }
@@ -3690,6 +4069,8 @@ pub fn run() {
             commands::list_library_preferences,
             commands::apply_library_changes,
             commands::list_library_code_history,
+            commands::list_library_cowork_sessions,
+            commands::list_sessions_for_project,
             commands::get_profile_stats
         ])
         .run(tauri::generate_context!())
@@ -4746,6 +5127,7 @@ mod tests {
                 make_cell("c", true, None, Some("link-Y")),
                 make_cell("d", false, None, None),
             ],
+            interactive: true,
         };
         compute_row_states(&mut row, /* supports_symlink */ true);
         assert_eq!(row.cells[0].state, "shared");
@@ -4766,6 +5148,7 @@ mod tests {
                 make_cell("c", true, Some("hashB"), None),
                 make_cell("d", false, None, None),
             ],
+            interactive: true,
         };
         compute_row_states(&mut row, /* supports_symlink */ false);
         // a and b have the same digest, but c diverges — everybody present
@@ -4787,6 +5170,7 @@ mod tests {
                 make_cell("a", true, Some("hashA"), None),
                 make_cell("b", false, None, None),
             ],
+            interactive: true,
         };
         compute_row_states(&mut row, false);
         assert_eq!(row.cells[0].state, "independent");
@@ -4804,6 +5188,7 @@ mod tests {
                 make_cell("b", true, Some("h"), None),
                 make_cell("c", false, None, None),
             ],
+            interactive: true,
         };
         compute_row_states(&mut row, false);
         assert_eq!(row.cells[0].state, "copied");
