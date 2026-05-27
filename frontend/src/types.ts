@@ -233,10 +233,37 @@ export type LibraryCellChange = {
 };
 
 export type LibraryKind =
+  | "code_history"
   | "extensions"
   | "mcp_servers"
   | "cowork_skills"
   | "preferences";
+
+// -----------------------------
+// Profile stats — codexbar-style status panel
+// -----------------------------
+
+export type ProfileStats = {
+  install_id: string;
+  install_name: string;
+  kind: string;
+  data_dir: string;
+  account_id: string | null;
+  org_id: string | null;
+  disk_bytes: number | null;
+  created_at_ms: number | null;
+  last_activity_ms: number | null;
+  code_session_count: number;
+  code_total_bytes: number;
+  code_recent_cwds: string[];
+  extension_count: number;
+  mcp_server_count: number;
+  cowork_skill_count: number;
+  /** 8-hex prefix of the workspace link target; same digest = same group. */
+  link_group: string | null;
+  /** install_ids that share this workspace via symlink. */
+  shared_with: string[];
+};
 
 // -----------------------------
 // Shared

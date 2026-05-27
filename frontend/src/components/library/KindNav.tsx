@@ -1,4 +1,4 @@
-import { Blocks, Boxes, Hammer, Settings2 } from "lucide-react";
+import { Blocks, Boxes, Hammer, MessagesSquare, Settings2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import type { LibraryKind, LibraryRow } from "@/types";
 
@@ -12,26 +12,32 @@ type KindDef = {
 
 const KINDS: KindDef[] = [
   {
+    value: "code_history",
+    label: "Code history",
+    icon: MessagesSquare,
+    blurb: "Cowork chat sessions",
+  },
+  {
     value: "extensions",
-    label: "extensions",
+    label: "Extensions",
     icon: Blocks,
-    blurb: "Claude Desktop add-ons",
+    blurb: "Desktop add-ons",
   },
   {
     value: "mcp_servers",
-    label: "mcp servers",
+    label: "MCP servers",
     icon: Boxes,
     blurb: "claude_desktop_config.json",
   },
   {
     value: "cowork_skills",
-    label: "cowork skills",
+    label: "Cowork skills",
     icon: Hammer,
-    blurb: "local-agent-mode/skills",
+    blurb: "local-agent skills",
   },
   {
     value: "preferences",
-    label: "preferences",
+    label: "Preferences",
     icon: Settings2,
     blurb: "allowlisted prefs",
   },
@@ -62,8 +68,8 @@ export function computeKindCount(rows: LibraryRow[]): {
 export function KindNav({ value, onChange, counts }: KindNavProps) {
   return (
     <nav className="flex flex-col gap-0.5">
-      <div className="px-3 pb-1.5 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
-        content
+      <div className="px-3 pb-2 font-sans text-[10px] uppercase tracking-[0.14em] text-muted-foreground/70">
+        Content
       </div>
       {KINDS.map((kind) => {
         const Icon = kind.icon;
@@ -75,13 +81,13 @@ export function KindNav({ value, onChange, counts }: KindNavProps) {
             type="button"
             onClick={() => onChange(kind.value)}
             className={cn(
-              "group flex items-center justify-between gap-2 rounded-sm px-3 py-1.5 text-left transition-colors",
+              "group flex items-center justify-between gap-2 rounded-md px-3 py-2 text-left transition-colors",
               active
-                ? "bg-accent/15 text-foreground"
-                : "text-foreground/70 hover:bg-accent/8 hover:text-foreground",
+                ? "bg-primary/10 text-foreground"
+                : "text-foreground/75 hover:bg-muted hover:text-foreground",
             )}
           >
-            <span className="flex min-w-0 items-center gap-2">
+            <span className="flex min-w-0 items-center gap-2.5">
               <Icon
                 className={cn(
                   "h-3.5 w-3.5 shrink-0",
@@ -89,8 +95,8 @@ export function KindNav({ value, onChange, counts }: KindNavProps) {
                 )}
               />
               <span className="flex flex-col leading-tight">
-                <span className="font-mono text-xs">{kind.label}</span>
-                <span className="font-sans text-[9px] text-muted-foreground/70">
+                <span className="font-sans text-[13px]">{kind.label}</span>
+                <span className="font-sans text-[10px] text-muted-foreground/70">
                   {kind.blurb}
                 </span>
               </span>

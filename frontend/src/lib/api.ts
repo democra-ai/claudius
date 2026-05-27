@@ -7,6 +7,7 @@ import type {
   LibraryCellChange,
   LibraryKind,
   LibraryRow,
+  ProfileStats,
   PairCodeProjectShare,
   PairCodeShareChange,
   PairCoworkSkillChange,
@@ -191,7 +192,9 @@ export const api = {
   // One call returns the full (item × profile) grid for the kind.
   listLibrary(kind: LibraryKind): Promise<LibraryRow[]> {
     const command =
-      kind === "extensions"
+      kind === "code_history"
+        ? "list_library_code_history"
+        : kind === "extensions"
         ? "list_library_extensions"
         : kind === "mcp_servers"
         ? "list_library_mcp"
@@ -206,6 +209,10 @@ export const api = {
     changes: LibraryCellChange[],
   ): Promise<CopySummary> {
     return invoke("apply_library_changes", { kind, changes });
+  },
+
+  getProfileStats(installId: string): Promise<ProfileStats> {
+    return invoke("get_profile_stats", { installId });
   },
 };
 

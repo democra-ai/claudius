@@ -78,30 +78,33 @@ export function Matrix({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-hidden rounded border bg-card">
       {/* Search bar */}
-      <div className="flex items-center justify-between gap-3 border-b bg-muted/20 px-3 py-2">
-        <div className="font-mono text-[11px] uppercase tracking-wider text-muted-foreground">
-          {filtered.length}/{rows.length}
-          <span className="mx-2 opacity-50">·</span>
-          {profiles.length} profile{profiles.length === 1 ? "" : "s"}
+      <div className="flex items-center justify-between gap-3 border-b bg-muted/20 px-4 py-2.5">
+        <div className="font-sans text-[11px] text-muted-foreground">
+          <span className="font-mono tabular-nums">{filtered.length}</span>
+          <span className="opacity-50"> of </span>
+          <span className="font-mono tabular-nums">{rows.length}</span>
+          <span className="mx-2 opacity-30">·</span>
+          <span className="font-mono tabular-nums">{profiles.length}</span> profile
+          {profiles.length === 1 ? "" : "s"}
         </div>
         <div className="relative w-64">
           <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />
           <Input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="filter"
-            className="h-7 pl-8 font-mono text-xs"
+            placeholder="Filter items"
+            className="h-7 pl-8 font-sans text-xs"
           />
         </div>
       </div>
 
       {/* Sticky column header */}
       <div
-        className="grid border-b bg-muted/30 text-[10px] font-medium uppercase tracking-wider"
+        className="grid border-b bg-muted/30"
         style={{ gridTemplateColumns: gridTemplate }}
       >
-        <div className="border-r px-3 py-2 font-mono text-muted-foreground">
-          item
+        <div className="border-r px-4 py-2 font-sans text-[10px] uppercase tracking-[0.14em] text-muted-foreground">
+          Item
         </div>
         {profiles.map((p, i) => {
           const summary = columnSummary[i];
@@ -109,15 +112,15 @@ export function Matrix({
             <div
               key={p.id}
               className={cn(
-                "flex flex-col items-center justify-center py-1.5 font-mono leading-none",
+                "flex flex-col items-center justify-center px-1 py-2 leading-none",
                 p.kind === "default" && "bg-muted/40",
               )}
               title={`${p.name}\n${summary.present} present · ${summary.shared} shared · ${summary.copied} copied`}
             >
-              <span className="truncate text-foreground/90">
-                {p.kind === "default" ? "default" : p.name}
+              <span className="truncate font-sans text-[12px] font-medium text-foreground/90">
+                {p.kind === "default" ? "Default" : p.name}
               </span>
-              <span className="mt-0.5 text-[9px] tracking-normal text-muted-foreground/70">
+              <span className="mt-0.5 font-mono text-[9px] tabular-nums text-muted-foreground/70">
                 {summary.shared > 0 ? (
                   <span className="text-state-shared">
                     {STATE_GLYPH.shared} {summary.shared}
@@ -129,7 +132,9 @@ export function Matrix({
                   </span>
                 ) : null}
                 {summary.shared === 0 && summary.copied === 0 ? (
-                  <span>{summary.present}/{rows.length}</span>
+                  <span>
+                    {summary.present}/{rows.length}
+                  </span>
                 ) : null}
               </span>
             </div>
@@ -140,15 +145,15 @@ export function Matrix({
       {/* Body */}
       <div className="scrollbar-thin min-h-0 flex-1 overflow-y-auto">
         {loading ? (
-          <div className="space-y-1 p-3 font-mono text-xs text-muted-foreground">
+          <div className="space-y-1 p-3 text-muted-foreground">
             {Array.from({ length: 8 }).map((_, i) => (
-              <div key={i} className="h-9 animate-pulse rounded bg-muted/40" />
+              <div key={i} className="h-10 animate-pulse rounded-md bg-muted/40" />
             ))}
           </div>
         ) : filtered.length === 0 ? (
           <div className="flex h-full flex-col items-center justify-center gap-3 py-16 text-center text-muted-foreground">
             <Inbox className="h-8 w-8 opacity-50" />
-            <p className="font-mono text-xs">{emptyHint ?? "// nothing here"}</p>
+            <p className="font-sans text-sm">{emptyHint ?? "Nothing here yet."}</p>
           </div>
         ) : (
           <div className="stagger-children">
@@ -173,16 +178,18 @@ export function Matrix({
                     type="button"
                     onClick={() => onRowSelect(isSelected ? null : row.id)}
                     className={cn(
-                      "flex flex-col items-start justify-center gap-0.5 border-r px-3 py-1.5 text-left transition-colors",
-                      "hover:bg-accent/10",
+                      "flex flex-col items-start justify-center gap-0.5 border-r px-4 py-2 text-left transition-colors",
+                      "hover:bg-muted/40",
                       isSelected && "border-l-2 border-l-primary",
                     )}
                     title={row.id}
                   >
                     <span
                       className={cn(
-                        "truncate font-mono text-xs",
-                        isSelected ? "text-foreground" : "text-foreground/80",
+                        "truncate font-sans text-[13px]",
+                        isSelected
+                          ? "font-medium text-foreground"
+                          : "text-foreground/85",
                       )}
                     >
                       {row.label}

@@ -3125,6 +3125,7 @@ pub fn apply_library_change(
             "mcp_servers" => list_mcp_library()?,
             "cowork_skills" => list_cowork_skills_library()?,
             "preferences" => list_preferences_library()?,
+            "code_history" => list_code_history_library()?,
             _ => return Err(format!("Unknown library kind: {kind}")),
         };
         let row = rows
@@ -3192,6 +3193,15 @@ pub fn apply_library_change(
             let key = &change.row_id[colon + 1..];
             set_pair_preference_copied(&source_dir, &target_dir, key, scope, change.wants)
         }
+        "code_history" => {
+            // Single workspace per profile — share or unshare against source.
+            let summary = apply_pair_desktop_code_history(
+                source.data_dir.clone(),
+                target.data_dir.clone(),
+                PairDesktopCodeHistoryChange { shared: change.wants },
+            )?;
+            Ok(summary.copied > 0)
+        }
         other => Err(format!("Unknown library kind: {other}")),
     }
 }
@@ -3210,6 +3220,243 @@ pub fn apply_library_changes(
         }
     }
     Ok(CopySummary { copied, skipped })
+}
+
+// ----- Code History library (1-row matrix view) -----
+//
+// Unlike per-item kinds, Code History is workspace-level: each Desktop
+// profile has exactly one current workspace
+// (`claude-code-sessions/<accountId>/<orgId>/`) and the share unit is
+// "this profile's workspace IS that profile's workspace" via symlink.
+// To fit into the matrix shell we render it as a single fat row where
+// each cell carries rich detail (session count, last activity, top cwd)
+// and the link_target_digest groups profiles into shared workspaces.
+
+pub fn list_code_history_library() -> Result<Vec<LibraryRow>, String> {
+    let installs = list_desktop_installs()?;
+    let cells: Vec<LibraryCell> = installs
+        .into_iter()
+        .map(|install| {
+            let data_dir = PathBuf::from(&install.data_dir);
+            let sessions_root = desktop_code_sessions_path(&data_dir);
+            let stat = scan_desktop_code_history_with_data_dir(&data_dir, &sessions_root)
+                .unwrap_or_default();
+            let primary_path = stat
+                .primary_workspace
+                .as_ref()
+                .map(|ws| desktop_code_workspace_path(&data_dir, ws));
+            let link_d = primary_path.as_deref().and_then(symlink_target_digest);
+            let detail = if stat.present {
+                let cwd = stat.recent_cwds.first().map(|s| {
+                    let trimmed = s.replace(&std::env::var("HOME").unwrap_or_default(), "~");
+                    if trimmed.len() > 28 {
+                        format!("…{}", &trimmed[trimmed.len() - 27..])
+                    } else {
+                        trimmed
+                    }
+                });
+                let ago = if stat.last_activity_ms > 0 {
+                    Some(humanize_ago(stat.last_activity_ms))
+                } else {
+                    None
+                };
+                let parts: Vec<String> = [
+                    Some(format!("{} sessions", stat.session_count)),
+                    cwd,
+                    ago,
+                ]
+                .into_iter()
+                .flatten()
+                .collect();
+                Some(parts.join(" · "))
+            } else {
+                None
+            };
+            LibraryCell {
+                install_id: install.id.clone(),
+                install_name: install.name.clone(),
+                data_dir: install.data_dir.clone(),
+                kind: install.kind.clone(),
+                state: String::new(),
+                present: stat.present,
+                detail,
+                digest: None,
+                link_target_digest: link_d,
+            }
+        })
+        .collect();
+    let mut row = LibraryRow {
+        id: "workspace".into(),
+        label: "Cowork code workspace".into(),
+        description: Some(
+            "One per Desktop profile — symlink to share session history live."
+                .into(),
+        ),
+        cells,
+    };
+    compute_row_states(&mut row, /* supports_symlink */ true);
+    Ok(vec![row])
+}
+
+/// "5m ago", "2h ago", "3d ago" — concise relative time for densely-packed
+/// cells. Uses chrono::Utc::now() so it's testable and consistent with the
+/// rest of the codebase.
+fn humanize_ago(ms: i64) -> String {
+    let now = Utc::now().timestamp_millis();
+    let delta = (now - ms).max(0);
+    let s = delta / 1000;
+    if s < 60 {
+        format!("{s}s ago")
+    } else if s < 3600 {
+        format!("{}m ago", s / 60)
+    } else if s < 86_400 {
+        format!("{}h ago", s / 3600)
+    } else if s < 86_400 * 30 {
+        format!("{}d ago", s / 86_400)
+    } else {
+        format!("{}mo ago", s / (86_400 * 30))
+    }
+}
+
+// ----- Profile detail (codexbar-style stat panel) -----
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ProfileStats {
+    pub install_id: String,
+    pub install_name: String,
+    pub kind: String,
+    pub data_dir: String,
+    pub account_id: Option<String>,
+    pub org_id: Option<String>,
+    /// Bytes-on-disk of the data directory. Computed via `du -sk` (fast).
+    pub disk_bytes: Option<u64>,
+    /// Unix millis — when the data dir was first created (mtime of the dir).
+    pub created_at_ms: Option<i64>,
+    /// Unix millis — last write activity anywhere in the dir.
+    pub last_activity_ms: Option<i64>,
+    /// Cowork code session count (from `claude-code-sessions/`).
+    pub code_session_count: u32,
+    pub code_total_bytes: u64,
+    pub code_recent_cwds: Vec<String>,
+    /// Number of installed Desktop extensions.
+    pub extension_count: u32,
+    /// Number of MCP servers in claude_desktop_config.json.
+    pub mcp_server_count: u32,
+    /// Number of Cowork skills active in this profile's combo dir.
+    pub cowork_skill_count: u32,
+    /// 8-hex prefix of the link_target_digest of the workspace symlink,
+    /// useful for "shared with these other profiles" badges.
+    pub link_group: Option<String>,
+    /// install_ids of other profiles that share this workspace.
+    pub shared_with: Vec<String>,
+}
+
+fn dir_disk_bytes(path: &Path) -> Option<u64> {
+    // `du -sk` is heavily optimized for this and beats a naive walkdir for
+    // huge dirs (Claude data dirs routinely hit 5-15 GB).
+    let out = Command::new("/usr/bin/du")
+        .args(["-sk", "-x"])
+        .arg(path)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout);
+    let kb: u64 = s.split_whitespace().next()?.parse().ok()?;
+    Some(kb * 1024)
+}
+
+fn dir_created_ms(path: &Path) -> Option<i64> {
+    let meta = fs::metadata(path).ok()?;
+    // On macOS, `created()` returns birth time. Fall back to modified.
+    let t = meta.created().ok().or_else(|| meta.modified().ok())?;
+    Some(system_time_to_epoch_ms(t))
+}
+
+pub fn get_profile_stats(install_id: String) -> Result<ProfileStats, String> {
+    let installs = list_desktop_installs()?;
+    let install = installs
+        .iter()
+        .find(|i| i.id == install_id)
+        .ok_or_else(|| format!("Profile {install_id} not found"))?
+        .clone();
+
+    let data_dir = PathBuf::from(&install.data_dir);
+    let account_id = read_account_id(&data_dir).unwrap_or(None);
+    let org_id = read_org_id(&data_dir).unwrap_or(None);
+
+    let stat = scan_desktop_code_history_with_data_dir(
+        &data_dir,
+        &desktop_code_sessions_path(&data_dir),
+    )
+    .unwrap_or_default();
+
+    let extensions = list_extensions_in_dir(&data_dir).unwrap_or_default();
+    let config = read_desktop_config(&data_dir).unwrap_or(serde_json::json!({}));
+    let mcp_count = mcp_servers_obj(&config).map(|m| m.len()).unwrap_or(0);
+    let cowork_skills = find_skills_combo_dir(&data_dir)
+        .unwrap_or(None)
+        .and_then(|combo| read_skills_manifest(&combo).ok())
+        .map(|m| manifest_skill_entries(&m).len())
+        .unwrap_or(0);
+
+    // Link group: digest of the workspace symlink target. Then find any
+    // other profile that points to the same canonical target.
+    let primary_path = stat
+        .primary_workspace
+        .as_ref()
+        .map(|ws| desktop_code_workspace_path(&data_dir, ws));
+    let link_digest = primary_path.as_deref().and_then(symlink_target_digest);
+    let mut shared_with: Vec<String> = Vec::new();
+    if let Some(ref my_digest) = link_digest {
+        for other in &installs {
+            if other.id == install.id {
+                continue;
+            }
+            let od = PathBuf::from(&other.data_dir);
+            let ostat = scan_desktop_code_history_with_data_dir(
+                &od,
+                &desktop_code_sessions_path(&od),
+            )
+            .unwrap_or_default();
+            let opath = ostat
+                .primary_workspace
+                .as_ref()
+                .map(|ws| desktop_code_workspace_path(&od, ws));
+            if let Some(od_path) = opath {
+                if let Some(d) = symlink_target_digest(&od_path) {
+                    if &d == my_digest {
+                        shared_with.push(other.id.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(ProfileStats {
+        install_id: install.id,
+        install_name: install.name,
+        kind: install.kind,
+        data_dir: install.data_dir.clone(),
+        account_id,
+        org_id,
+        disk_bytes: dir_disk_bytes(&data_dir),
+        created_at_ms: dir_created_ms(&data_dir),
+        last_activity_ms: if stat.last_activity_ms > 0 {
+            Some(stat.last_activity_ms)
+        } else {
+            None
+        },
+        code_session_count: stat.session_count,
+        code_total_bytes: stat.total_bytes,
+        code_recent_cwds: stat.recent_cwds,
+        extension_count: extensions.len() as u32,
+        mcp_server_count: mcp_count as u32,
+        cowork_skill_count: cowork_skills as u32,
+        link_group: link_digest.map(|d| d.chars().take(8).collect()),
+        shared_with,
+    })
 }
 
 mod commands {
@@ -3401,6 +3648,16 @@ mod commands {
     ) -> Result<CopySummary, String> {
         super::apply_library_changes(kind, changes)
     }
+
+    #[tauri::command]
+    pub fn list_library_code_history() -> Result<Vec<LibraryRow>, String> {
+        super::list_code_history_library()
+    }
+
+    #[tauri::command]
+    pub fn get_profile_stats(install_id: String) -> Result<ProfileStats, String> {
+        super::get_profile_stats(install_id)
+    }
 }
 
 pub fn run() {
@@ -3431,7 +3688,9 @@ pub fn run() {
             commands::list_library_mcp,
             commands::list_library_cowork_skills,
             commands::list_library_preferences,
-            commands::apply_library_changes
+            commands::apply_library_changes,
+            commands::list_library_code_history,
+            commands::get_profile_stats
         ])
         .run(tauri::generate_context!())
         .expect("error while running Claude Multiprofile");

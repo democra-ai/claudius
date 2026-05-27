@@ -21,31 +21,31 @@ export function PendingBar({ count, applying, onApply, onCancel }: PendingBarPro
         "shadow-[0_0_0_1px_hsl(var(--border)),0_8px_24px_-12px_rgba(0,0,0,0.4)]",
       )}
     >
-      <div className="flex items-center gap-2 px-3 py-1.5 font-mono text-xs">
-        <span className="tabular-nums text-foreground">{count}</span>
+      <div className="flex items-center gap-1.5 px-3 py-1.5 font-sans text-xs">
+        <span className="font-mono tabular-nums text-foreground">{count}</span>
         <span className="text-muted-foreground">pending</span>
       </div>
       <button
         type="button"
         onClick={onCancel}
         disabled={applying}
-        className="flex items-center gap-1.5 rounded-sm px-3 py-1.5 font-mono text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground disabled:opacity-40"
+        className="flex items-center gap-1.5 rounded-md px-3 py-1.5 font-sans text-xs text-muted-foreground transition-colors hover:bg-muted/60 hover:text-foreground disabled:opacity-40"
       >
         <X className="h-3 w-3" />
-        cancel
+        Cancel
       </button>
       <button
         type="button"
         onClick={onApply}
         disabled={applying}
-        className="flex items-center gap-1.5 rounded-sm bg-primary px-3 py-1.5 font-mono text-xs text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
+        className="flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 font-sans text-xs font-medium text-primary-foreground transition-colors hover:bg-primary/90 disabled:opacity-40"
       >
         {applying ? (
           <Loader2 className="h-3 w-3 animate-spin" />
         ) : (
           <Check className="h-3 w-3" />
         )}
-        apply
+        Apply
       </button>
     </div>
   );

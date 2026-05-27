@@ -60,8 +60,14 @@ module.exports = {
           "system-ui",
           "sans-serif",
         ],
+        display: [
+          "Fraunces",
+          "Iowan Old Style",
+          "Times New Roman",
+          "Georgia",
+          "serif",
+        ],
         mono: [
-          "JetBrains Mono Variable",
           "JetBrains Mono",
           "SF Mono",
           "Menlo",

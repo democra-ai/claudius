@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Play, Plus } from "lucide-react";
+import { Info, Play, Plus } from "lucide-react";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -14,20 +14,23 @@ import type {
 } from "@/types";
 import { KindNav, computeKindCount } from "./KindNav";
 import { Matrix } from "./Matrix";
-import { DetailSheet } from "./DetailSheet";
+import { DetailSheet, type Selection } from "./DetailSheet";
 import { PendingBar } from "./PendingBar";
 
 const EMPTY_HINTS: Record<LibraryKind, string> = {
-  extensions: "// no extensions installed in any profile",
-  mcp_servers: "// no mcpServers in any claude_desktop_config.json",
-  cowork_skills: "// no Cowork skills — open Cowork in any profile once",
-  preferences: "// allowlisted preferences not set in any profile",
+  code_history: "No Cowork code sessions yet in any profile.",
+  extensions: "No extensions installed in any profile.",
+  mcp_servers: "No MCP servers configured in any claude_desktop_config.json.",
+  cowork_skills: "No Cowork skills — open Cowork in any profile once.",
+  preferences: "Allowlisted preferences not set in any profile.",
 };
 
 interface SidebarProfileRowProps {
   profile: DesktopInstall;
   visible: boolean;
+  selected: boolean;
   onToggleVisible: () => void;
+  onSelect: () => void;
   onLaunch: () => void;
   busy: boolean;
 }
@@ -35,39 +38,56 @@ interface SidebarProfileRowProps {
 function SidebarProfileRow({
   profile,
   visible,
+  selected,
   onToggleVisible,
+  onSelect,
   onLaunch,
   busy,
 }: SidebarProfileRowProps) {
   return (
     <div
       className={cn(
-        "group flex items-center gap-2 rounded-sm px-2 py-1 transition-colors",
-        visible ? "" : "opacity-50",
+        "group flex items-center gap-1.5 rounded-md pl-1.5 pr-1 transition-colors",
+        selected ? "bg-primary/8" : "hover:bg-muted/60",
+        !visible && "opacity-55",
       )}
     >
       <Checkbox
         checked={visible}
         onCheckedChange={onToggleVisible}
         aria-label={`Show ${profile.name} column`}
+        className="h-3.5 w-3.5"
       />
+      <button
+        type="button"
+        onClick={onSelect}
+        className={cn(
+          "flex min-w-0 flex-1 items-center gap-2 py-1.5 pl-1 pr-1 text-left",
+        )}
+        title={`Show ${profile.name} details`}
+      >
+        <span
+          className={cn(
+            "inline-block h-1.5 w-1.5 shrink-0 rounded-full",
+            profile.kind === "default" ? "bg-primary" : "bg-muted-foreground/60",
+          )}
+        />
+        <span className="truncate font-sans text-[13px]">
+          {profile.kind === "default" ? "Default" : profile.name}
+        </span>
+        {selected ? (
+          <Info className="ml-auto h-3 w-3 shrink-0 text-primary" />
+        ) : null}
+      </button>
       <button
         type="button"
         onClick={onLaunch}
         disabled={busy}
-        className="flex min-w-0 flex-1 items-center gap-1.5 text-left font-mono text-xs"
+        className="shrink-0 rounded-md p-1 text-muted-foreground opacity-0 transition-all hover:bg-primary/10 hover:text-primary group-hover:opacity-100 disabled:opacity-40"
         title={`Launch ${profile.name}`}
+        aria-label={`Launch ${profile.name}`}
       >
-        <span
-          className={cn(
-            "inline-block h-1.5 w-1.5 rounded-full",
-            profile.kind === "default" ? "bg-primary" : "bg-muted-foreground/60",
-          )}
-        />
-        <span className="truncate">
-          {profile.kind === "default" ? "default" : profile.name}
-        </span>
-        <Play className="ml-auto h-3 w-3 opacity-0 transition-opacity group-hover:opacity-100" />
+        <Play className="h-3 w-3" />
       </button>
     </div>
   );
@@ -76,12 +96,12 @@ function SidebarProfileRow({
 export default function ContentLibraryPage() {
   const [installs, setInstalls] = useState<DesktopInstall[]>([]);
   const [visibleIds, setVisibleIds] = useState<Set<string>>(new Set());
-  const [activeKind, setActiveKind] = useState<LibraryKind>("extensions");
+  const [activeKind, setActiveKind] = useState<LibraryKind>("code_history");
   const [rowsByKind, setRowsByKind] = useState<
     Partial<Record<LibraryKind, LibraryRow[]>>
   >({});
   const [pending, setPending] = useState<Map<string, boolean>>(new Map());
-  const [selectedRowId, setSelectedRowId] = useState<string | null>(null);
+  const [selection, setSelection] = useState<Selection>(null);
   const [busy, setBusy] = useState(false);
   const [applying, setApplying] = useState(false);
   const [loadingKind, setLoadingKind] = useState<LibraryKind | null>(null);
@@ -98,6 +118,7 @@ export default function ContentLibraryPage() {
       Record<LibraryKind, { synced: number; total: number } | null>
     > = {};
     for (const kind of [
+      "code_history",
       "extensions",
       "mcp_servers",
       "cowork_skills",
@@ -108,6 +129,12 @@ export default function ContentLibraryPage() {
     }
     return out;
   }, [rowsByKind]);
+
+  const resolveInstallName = useCallback(
+    (installId: string) =>
+      installs.find((i) => i.id === installId)?.name,
+    [installs],
+  );
 
   const loadInstalls = useCallback(async () => {
     if (!isTauri()) {
@@ -122,7 +149,6 @@ export default function ContentLibraryPage() {
         if (current.size === 0) return new Set(list.map((p) => p.id));
         const valid = new Set<string>();
         for (const p of list) if (current.has(p.id)) valid.add(p.id);
-        // If filter dropped to zero (e.g., all profiles removed), show everything.
         return valid.size === 0 ? new Set(list.map((p) => p.id)) : valid;
       });
     } catch (e) {
@@ -156,13 +182,43 @@ export default function ContentLibraryPage() {
     loadKind(activeKind);
   }, [activeKind, loadKind, installs.length]);
 
-  // Refresh visible-kind data when the active set of profiles changes.
-  // (Adding a profile means a new column.)
   useEffect(() => {
     if (installs.length === 0) return;
     loadKind(activeKind);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [installs.length]);
+
+  // Eagerly load counts for the other kinds in the background so KindNav
+  // shows N/M for everything, not just the active tab.
+  useEffect(() => {
+    const others: LibraryKind[] = [
+      "code_history",
+      "extensions",
+      "mcp_servers",
+      "cowork_skills",
+      "preferences",
+    ];
+    const todo = others.filter((k) => k !== activeKind && !rowsByKind[k]);
+    if (todo.length === 0 || !isTauri()) return;
+    let cancelled = false;
+    (async () => {
+      for (const kind of todo) {
+        if (cancelled) return;
+        try {
+          const rows = await api.listLibrary(kind);
+          if (!cancelled) {
+            setRowsByKind((current) => ({ ...current, [kind]: rows }));
+          }
+        } catch {
+          /* count badge will stay blank — non-fatal */
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeKind, installs.length]);
 
   const handleCellToggle = useCallback(
     (rowId: string, installId: string, nextPresent: boolean) => {
@@ -173,11 +229,17 @@ export default function ContentLibraryPage() {
       const key = `${rowId}:${installId}`;
       setPending((current) => {
         const next = new Map(current);
-        // If the toggle returns to the original state, drop the pending entry.
-        if (nextPresent === cell.present) {
+        // For symlink content, "currently shared" is what we should compare —
+        // for code-history the "present" check is too lax. Use the cell's
+        // current effective state instead.
+        const currentShared =
+          cell.state === "shared" || cell.state === "copied";
+        // Toggling back to the original state drops the pending entry.
+        const wantsShared = nextPresent;
+        if (wantsShared === currentShared && cell.present === wantsShared) {
           next.delete(key);
         } else {
-          next.set(key, nextPresent);
+          next.set(key, wantsShared);
         }
         return next;
       });
@@ -198,11 +260,25 @@ export default function ContentLibraryPage() {
     try {
       const summary = await api.applyLibraryChanges(activeKind, changes);
       push(
-        `applied: ${summary.copied}, skipped: ${summary.skipped}`,
+        `Applied ${summary.copied} change${
+          summary.copied === 1 ? "" : "s"
+        }, skipped ${summary.skipped}.`,
         "success",
       );
       setPending(new Map());
       await loadKind(activeKind);
+      // Also refresh counts so KindNav stays accurate.
+      const others = (
+        ["code_history", "extensions", "mcp_servers", "cowork_skills", "preferences"] as LibraryKind[]
+      ).filter((k) => k !== activeKind);
+      for (const k of others) {
+        api
+          .listLibrary(k)
+          .then((rs) =>
+            setRowsByKind((current) => ({ ...current, [k]: rs })),
+          )
+          .catch(() => undefined);
+      }
     } catch (e) {
       push(String(e), "error");
     } finally {
@@ -226,7 +302,7 @@ export default function ContentLibraryPage() {
       setBusy(true);
       try {
         await api.launchDesktopInstall(install.id);
-        push(`launching ${install.name}…`, "info");
+        push(`Launching ${install.name}…`, "info");
       } catch (e) {
         push(String(e), "error");
       } finally {
@@ -236,13 +312,34 @@ export default function ContentLibraryPage() {
     [push],
   );
 
+  const handleSelectProfile = useCallback((install: DesktopInstall) => {
+    setSelection((current) =>
+      current?.type === "profile" && current.install.id === install.id
+        ? null
+        : { type: "profile", install },
+    );
+  }, []);
+
+  const handleSelectRow = useCallback(
+    (rowId: string | null) => {
+      if (!rowId) {
+        setSelection((current) => (current?.type === "row" ? null : current));
+        return;
+      }
+      const row = rowsByKind[activeKind]?.find((r) => r.id === rowId);
+      if (!row) return;
+      setSelection({ type: "row", row });
+    },
+    [rowsByKind, activeKind],
+  );
+
   const handleCreate = useCallback(async () => {
     const name = newProfileName.trim();
     if (!name) return;
     setBusy(true);
     try {
       const created = await api.createDesktopProfile(name);
-      push(`created profile "${created.name}"`, "success");
+      push(`Created profile "${created.name}".`, "success");
       setNewProfileName("");
       await loadInstalls();
     } catch (e) {
@@ -252,42 +349,46 @@ export default function ContentLibraryPage() {
     }
   }, [newProfileName, loadInstalls, push]);
 
-  // Filter rows to the visible-profile subset by zeroing absent cells
-  // we don't render. Matrix.tsx itself doesn't need filtering — it iterates
-  // over the profiles list — so we can pass full rows + filtered profiles.
   const activeRows = rowsByKind[activeKind] ?? [];
-  const selectedRow = selectedRowId
-    ? activeRows.find((r) => r.id === selectedRowId) ?? null
-    : null;
+  const selectedRowId =
+    selection?.type === "row" ? selection.row.id : null;
+  const selectedInstallId =
+    selection?.type === "profile" ? selection.install.id : null;
 
   return (
     <div className="flex min-h-0 flex-1">
       {/* Left rail */}
-      <aside className="flex w-56 flex-col gap-3 border-r bg-card/40 py-3">
-        <KindNav
-          value={activeKind}
-          onChange={(k) => {
-            setActiveKind(k);
-            setPending(new Map());
-            setSelectedRowId(null);
-          }}
-          counts={counts}
-        />
+      <aside className="flex w-60 flex-col gap-3 border-r bg-card/30 py-4">
+        <div className="px-2">
+          <KindNav
+            value={activeKind}
+            onChange={(k) => {
+              setActiveKind(k);
+              setPending(new Map());
+              setSelection((current) =>
+                current?.type === "row" ? null : current,
+              );
+            }}
+            counts={counts}
+          />
+        </div>
 
-        <div className="border-t pt-3">
-          <div className="mb-1 flex items-center justify-between px-3 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
-            <span>profiles</span>
-            <span className="tabular-nums">
+        <div className="mx-2 border-t border-border/60 pt-3">
+          <div className="mb-1.5 flex items-center justify-between px-3 font-sans text-[10px] uppercase tracking-[0.14em] text-muted-foreground/80">
+            <span>Profiles</span>
+            <span className="font-mono text-[10px] tabular-nums text-muted-foreground/60">
               {visibleIds.size}/{installs.length}
             </span>
           </div>
-          <div className="px-1">
+          <div className="space-y-0.5 px-1">
             {installs.map((p) => (
               <SidebarProfileRow
                 key={p.id}
                 profile={p}
                 visible={visibleIds.has(p.id)}
+                selected={selectedInstallId === p.id}
                 onToggleVisible={() => handleToggleVisible(p.id)}
+                onSelect={() => handleSelectProfile(p)}
                 onLaunch={() => handleLaunch(p)}
                 busy={busy}
               />
@@ -295,9 +396,9 @@ export default function ContentLibraryPage() {
           </div>
         </div>
 
-        <div className="mt-auto border-t px-2 pt-3">
-          <div className="mb-1 px-1 font-mono text-[10px] uppercase tracking-wider text-muted-foreground/70">
-            new desktop profile
+        <div className="mx-2 mt-auto border-t border-border/60 px-1 pt-3">
+          <div className="mb-1 px-2 font-sans text-[10px] uppercase tracking-[0.14em] text-muted-foreground/80">
+            New profile
           </div>
           <div className="flex gap-1">
             <Input
@@ -307,7 +408,7 @@ export default function ContentLibraryPage() {
                 if (e.key === "Enter") handleCreate();
               }}
               placeholder="name"
-              className="h-7 font-mono text-xs"
+              className="h-7 font-sans text-xs"
               disabled={busy}
             />
             <Button
@@ -325,7 +426,7 @@ export default function ContentLibraryPage() {
       </aside>
 
       {/* Center: matrix */}
-      <main className="flex min-h-0 flex-1 flex-col gap-2 p-3">
+      <main className="flex min-h-0 flex-1 flex-col gap-2 p-4">
         {toasts.length > 0 ? (
           <div className="space-y-1">
             {toasts.map((toast) => (
@@ -333,7 +434,7 @@ export default function ContentLibraryPage() {
                 key={toast.id}
                 onClick={() => dismiss(toast.id)}
                 className={cn(
-                  "block w-full rounded-sm border px-3 py-1.5 text-left font-mono text-[11px] transition-colors",
+                  "block w-full rounded-md border px-3 py-1.5 text-left font-sans text-[12px] transition-colors",
                   toast.kind === "error"
                     ? "border-destructive/40 bg-destructive/10 text-destructive"
                     : toast.kind === "success"
@@ -349,8 +450,8 @@ export default function ContentLibraryPage() {
 
         {visibleProfiles.length === 0 ? (
           <div className="flex flex-1 items-center justify-center text-muted-foreground">
-            <p className="font-mono text-xs">
-              // no profiles visible — toggle one on the left
+            <p className="font-sans text-sm">
+              No profiles selected — toggle one on the left.
             </p>
           </div>
         ) : (
@@ -359,7 +460,7 @@ export default function ContentLibraryPage() {
             profiles={visibleProfiles}
             pending={pending}
             onCellToggle={handleCellToggle}
-            onRowSelect={setSelectedRowId}
+            onRowSelect={handleSelectRow}
             selectedRowId={selectedRowId}
             loading={loadingKind === activeKind}
             emptyHint={EMPTY_HINTS[activeKind]}
@@ -367,8 +468,13 @@ export default function ContentLibraryPage() {
         )}
       </main>
 
-      {/* Right rail: detail */}
-      <DetailSheet row={selectedRow} onClose={() => setSelectedRowId(null)} />
+      {/* Right rail: profile or row detail */}
+      <DetailSheet
+        selection={selection}
+        onClose={() => setSelection(null)}
+        onLaunch={handleLaunch}
+        resolveInstallName={resolveInstallName}
+      />
 
       {/* Floating pending bar */}
       <PendingBar
