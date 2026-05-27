@@ -1,31 +1,29 @@
 # claude-multiprofile
 
+Run multiple Claude Desktop and Claude Code accounts side by side on macOS, fully isolated.
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![npm version](https://img.shields.io/npm/v/claude-multiprofile.svg)](https://www.npmjs.com/package/claude-multiprofile)
 [![Node](https://img.shields.io/badge/node-%3E%3D18-brightgreen)](https://nodejs.org/)
 [![Platform](https://img.shields.io/badge/platform-macOS-lightgrey)](https://www.apple.com/macos/)
 
-Run multiple Claude accounts side by side on macOS. Personal and work, multiple clients, separate test accounts. Each profile is fully isolated: its own login, chats, settings, MCP connectors, plugins, and skills. No more signing out of one account to use another.
+Personal and work, multiple clients, separate test accounts. Each profile is fully isolated: its own login, chats, settings, MCP connectors, plugins, and skills. No more signing out of one account to use another.
 
-Works for both Claude Desktop (the GUI app) and Claude Code (the terminal CLI), independently or together.
+Ships as both a one-command CLI (`claude-multiprofile`) and an optional Tauri desktop GUI for visual profile management.
 
 > **See it in action:** [examples/walkthrough.md](./examples/walkthrough.md) — a full session showing every prompt and output.
 
 > **Disclaimer.** This is an unofficial community tool. It uses public Electron flags (`--user-data-dir`) and a stable but undocumented Claude Code environment variable (`CLAUDE_CONFIG_DIR`) to keep profiles isolated. Anthropic engineers have engaged on the open feature requests for native multi-account in both apps, so the approach is well known, but it is not officially supported. If a future Claude release changes how profiles work, this tool will need to catch up.
 
-## Why this exists
+## Features
 
-Claude Desktop and Claude Code both assume a single signed-in account. There's no built-in profile switcher today (open feature requests: [Desktop](https://github.com/anthropics/claude-code/issues/32783), [Desktop UI](https://github.com/anthropics/claude-code/issues/18435)). The standard workaround is a manual setup:
-
-- For Desktop, launch with `open -n -a "Claude" --args --user-data-dir=...` against a custom data folder
-- For Code, set `CLAUDE_CONFIG_DIR=...` before running `claude`
-
-Both work. Both are fiddly to set up and easy to mess up. This tool automates the whole thing, including the things people forget:
-
-- Generating a real macOS `.app` launcher you can drag to the Dock
-- Copying the Claude icon onto the launcher so it's visually distinct
-- Adding a properly quoted shell alias to the right rc file (zsh, bash, fish)
-- Seeding new Code profiles from your existing `~/.claude` so plugins and MCP servers carry over (without leaking auth)
-- Tracking everything in a registry so you can list, status-check, and cleanly remove profiles
+- **One command, two apps** — sets up isolated profiles for Claude Desktop (GUI) and Claude Code (CLI), independently or together
+- **Real macOS launchers** — generates a `.app` bundle you can drag to the Dock, with Claude's icon copied across
+- **Shell aliases done right** — adds a properly quoted `claude-<name>` alias to your zsh/bash/fish rc file, inside a managed block
+- **Safe seeding** — bring your plugins, skills, and MCP servers from `~/.claude` into a new Code profile, without leaking auth (tokens are keyed to the config dir via Keychain hash)
+- **Profile registry** — `list`, `status`, `repair`, and `remove` commands keep things sane after machine migrations or LaunchServices cache hiccups
+- **Extension copy tool** — `extensions <profile>` shuttles Claude Desktop extensions between profiles, multi-select with conflict detection
+- **Tauri desktop GUI (optional)** — visual profile manager built on React 18 + Vite + TypeScript + Tailwind + shadcn/ui, sharing the same Rust core as the CLI
 
 ## Install
 
@@ -40,7 +38,7 @@ To upgrade later, run `claude-multiprofile upgrade` (or re-run the install comma
 If you want changes that haven't been published to npm yet:
 
 ```bash
-npm install -g github:jmdarre-v/claude-multiprofile
+npm install -g github:democra-ai/claude-multiprofile
 ```
 
 ### Requirements
@@ -66,7 +64,7 @@ For a profile named `work`, with both Desktop and Code targets, the tool creates
 ~/Applications/Claude WORK.app                ← Desktop launcher (drag to Dock)
 ~/.claude-work/                               ← Code config folder
 ~/.zshrc                                      ← adds: alias claude-work='...'
-~/.config/claude-multiprofile/profiles.json       ← registry entry
+~/.config/claude-multiprofile/profiles.json   ← registry entry
 ```
 
 Nothing about your existing default Claude install changes. Your current login, chats, MCP servers, and skills stay exactly where they are.
@@ -87,6 +85,37 @@ Authentication is the interesting bit. Claude Code stores its OAuth token in mac
 
 This means you can seed a new Code profile from your existing `~/.claude` (carrying over skills, plugins, and MCP servers) and the new profile will still ask you to log in fresh. The wizard offers this by default.
 
+## Desktop GUI (Tauri app)
+
+In addition to the CLI, the repo ships a Tauri-based desktop GUI for managing Claude Desktop profiles visually: list profiles, create new ones, launch them, and selectively share content (extensions today; MCP servers, Cowork skills, and preferences in flight) between any two profiles.
+
+The frontend lives in [`frontend/`](./frontend) (React 18 + Vite + TypeScript + TailwindCSS + shadcn/ui). The backend is the same Rust crate in [`src-tauri/`](./src-tauri) that the CLI talks to.
+
+### Run from source
+
+```bash
+git clone https://github.com/democra-ai/claude-multiprofile
+cd claude-multiprofile
+npm install                 # root Tauri CLI
+npm run frontend:install    # React deps
+npm run tauri:dev           # opens the GUI with hot reload
+```
+
+### Build a distributable `.app` + `.dmg`
+
+```bash
+npm run tauri:build
+```
+
+This produces:
+
+- `src-tauri/target/release/bundle/macos/Claude Multiprofile.app` — drag to `/Applications`
+- `src-tauri/target/release/bundle/dmg/Claude Multiprofile_<version>_<arch>.dmg` — share this with teammates
+
+Requirements: Rust toolchain (`rustup`), Xcode Command Line Tools, Node 18+.
+
+> The bundle is unsigned. macOS Gatekeeper will warn on first launch — right-click the `.app` and pick **Open**, or run `xattr -dr com.apple.quarantine "Claude Multiprofile.app"`.
+
 ## Commands
 
 ### `claude-multiprofile add`
@@ -94,7 +123,7 @@ This means you can seed a new Code profile from your existing `~/.claude` (carry
 Interactive wizard. Walks through:
 
 1. Whether to set up Desktop, Code, or both
-2. The profile name (e.g. `work`, `work`, `client-acme`)
+2. The profile name (e.g. `work`, `personal`, `client-acme`)
 3. Where the data/config folders should live
 4. Where to save the launcher .app (Desktop only)
 5. Whether to copy the Claude icon onto the launcher (Desktop only)
@@ -144,6 +173,10 @@ For Code-only profiles, this command has nothing to repair (there's no .app) and
 ### `claude-multiprofile remove [name]`
 
 Tears down a profile. Removes the launcher .app, the shell alias, and the registry entry. By default the data folders are kept (so you can recover your chats if you change your mind). The wizard asks separately about deleting the data folders.
+
+### `claude-multiprofile upgrade`
+
+Upgrades the CLI to the latest version on npm.
 
 ### `claude-multiprofile help` / `--version`
 
@@ -212,7 +245,7 @@ rm -rf ~/.claude-work/skills
 ln -s ~/.claude/skills ~/.claude-work/skills
 ```
 
-Same trick works for plugins or any sub-folder you want to share. Be careful with `projects/` if you want chat history to stay separate, that's the folder you do *not* want shared.
+Same trick works for plugins or any sub-folder you want to share. Be careful with `projects/` if you want chat history to stay separate — that's the folder you do *not* want shared.
 
 ## Troubleshooting
 
@@ -266,13 +299,13 @@ The Code half works fine on Linux, the Desktop half doesn't (Claude Desktop is m
 
 | Tool | Desktop | Code | Mac | Linux | Notes |
 |------|---------|------|-----|-------|-------|
-| claude-multiprofile (this) | yes | yes | yes | partial | Single tool for both, interactive wizard |
+| **claude-multiprofile** (this) | yes | yes | yes | partial | Single tool for both, interactive wizard, optional Tauri GUI |
 | [aimux](https://github.com/Digital-Threads/aimux) | no | yes | yes | yes | Code only, also handles symlink-sharing |
 | [aisw](https://crates.io/crates/aisw) | no | yes | yes | yes | Rust binary, also covers Codex CLI and Gemini CLI |
 | [Jean-Claude](https://madewithlove.com/blog/running-multiple-claude-accounts-without-logging-out/) | no | yes | yes | yes | Cross-machine sync, opinionated dotfiles |
 | Manual setup | yes | yes | yes | yes | Documented in [several](https://daring-designs.com/blog/how-to-run-multiple-claude-code-accounts-side-by-side) [places](https://wmedia.es/en/tips/claude-code-multiple-profiles-config-dir) |
 
-The pitch for this tool over the others: it's the only one that handles Claude Desktop alongside Claude Code in a single command, and the interactive wizard means you don't have to remember the right flags or know in advance where files should go.
+The pitch for this tool over the others: it's the only one that handles Claude Desktop alongside Claude Code in a single command, and the interactive wizard means you don't have to remember the right flags or know in advance where files should go. The Tauri GUI is there when you'd rather click than type.
 
 ## Security notes
 
@@ -291,12 +324,19 @@ It does not touch:
 - macOS Keychain (Claude Code's auth lives there but the tool never reads or writes Keychain entries)
 - Anything else on your filesystem
 
-The single npm dependency is `@inquirer/prompts`, the standard interactive-prompt library used by npm itself and most modern CLI tools.
+The single runtime npm dependency is `@inquirer/prompts`, the standard interactive-prompt library used by npm itself and most modern CLI tools.
 
 ## Contributing
 
-Issues and PRs welcome. The codebase is small and aggressively commented, so it should be easy to navigate. Run the tests with `npm test`.
+Issues and PRs welcome. The codebase is small and aggressively commented, so it should be easy to navigate.
+
+```bash
+git clone https://github.com/democra-ai/claude-multiprofile
+cd claude-multiprofile
+npm install
+npm test
+```
 
 ## License
 
-MIT
+MIT — see [LICENSE](./LICENSE).

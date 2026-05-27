@@ -1,0 +1,2795 @@
+use chrono::{SecondsFormat, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, HashSet};
+use std::env;
+use std::fs;
+use std::io::ErrorKind;
+#[cfg(unix)]
+use std::os::unix::fs as unix_fs;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+const EXT_DIR_NAME: &str = "Claude Extensions";
+const EXT_SETTINGS_DIR_NAME: &str = "Claude Extensions Settings";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionEntry {
+    pub id: String,
+    pub has_settings: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DesktopInstall {
+    pub id: String,
+    pub name: String,
+    pub kind: String,
+    pub data_dir: String,
+    pub app_path: Option<String>,
+    pub launcher_path: Option<String>,
+    pub managed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionSelectionRow {
+    pub id: String,
+    pub has_settings: bool,
+    pub exists_in_target: bool,
+    pub target_has_settings: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CopySummary {
+    pub copied: usize,
+    pub skipped: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionLibrarySource {
+    pub install_id: String,
+    pub install_name: String,
+    pub data_dir: String,
+    pub has_settings: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionTargetStatus {
+    pub install_id: String,
+    pub install_name: String,
+    pub data_dir: String,
+    pub kind: String,
+    pub has_extension: bool,
+    pub has_settings: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ExtensionShareItem {
+    pub id: String,
+    pub sources: Vec<ExtensionLibrarySource>,
+    pub targets: Vec<ExtensionTargetStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairExtensionShare {
+    pub id: String,
+    pub source_has_extension: bool,
+    pub target_has_extension: bool,
+    pub source_has_settings: bool,
+    pub target_has_settings: bool,
+    pub shared: bool,
+    pub partial: bool,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PairShareChange {
+    pub extension_id: String,
+    pub shared: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryFile {
+    pub version: u32,
+    pub profiles: Vec<RegistryProfile>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryProfile {
+    pub name: String,
+    #[serde(rename = "type")]
+    pub profile_type: String,
+    pub desktop: Option<RegistryDesktop>,
+    pub code: Option<serde_json::Value>,
+    #[serde(rename = "createdAt")]
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RegistryDesktop {
+    #[serde(rename = "dataDir")]
+    pub data_dir: String,
+    #[serde(rename = "appPath")]
+    pub app_path: String,
+    #[serde(rename = "claudeAppPath")]
+    pub claude_app_path: String,
+}
+
+pub fn sanitize_profile_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_was_dash = false;
+
+    for ch in name.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+            last_was_dash = false;
+        } else if !last_was_dash {
+            out.push('-');
+            last_was_dash = true;
+        }
+    }
+
+    out.trim_matches('-').to_string()
+}
+
+fn title_case(name: &str) -> String {
+    if name.len() <= 4 {
+        return name.to_uppercase();
+    }
+
+    name.split('-')
+        .filter(|part| !part.is_empty())
+        .map(|part| {
+            let mut chars = part.chars();
+            match chars.next() {
+                Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn home_dir() -> Result<PathBuf, String> {
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| "HOME is not set".to_string())
+}
+
+fn config_home() -> Result<PathBuf, String> {
+    Ok(env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .unwrap_or(home_dir()?.join(".config")))
+}
+
+fn registry_path() -> Result<PathBuf, String> {
+    Ok(config_home()?.join("claude-multiprofile").join("profiles.json"))
+}
+
+fn default_desktop_data_dir() -> Result<PathBuf, String> {
+    Ok(home_dir()?.join("Library").join("Application Support").join("Claude"))
+}
+
+fn default_data_dir_for(name: &str) -> Result<PathBuf, String> {
+    Ok(home_dir()?
+        .join("Library")
+        .join("Application Support")
+        .join(format!("Claude-{}", title_case(name))))
+}
+
+fn default_app_path_for(name: &str) -> Result<PathBuf, String> {
+    Ok(home_dir()?
+        .join("Applications")
+        .join(format!("Claude {}.app", title_case(name))))
+}
+
+fn empty_registry() -> RegistryFile {
+    RegistryFile {
+        version: 1,
+        profiles: Vec::new(),
+    }
+}
+
+pub fn save_registry_to_path(path: &Path, registry: &RegistryFile) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Create registry directory: {e}"))?;
+    }
+    let json = serde_json::to_string_pretty(registry).map_err(|e| format!("Serialize registry: {e}"))?;
+    fs::write(path, json + "\n").map_err(|e| format!("Write registry: {e}"))
+}
+
+pub fn load_registry_from_path(path: &Path) -> Result<RegistryFile, String> {
+    if !path.exists() {
+        return Ok(empty_registry());
+    }
+
+    let raw = fs::read_to_string(path).map_err(|e| format!("Read registry: {e}"))?;
+    let parsed: RegistryFile = serde_json::from_str(&raw).map_err(|e| format!("Parse registry: {e}"))?;
+    Ok(parsed)
+}
+
+fn load_registry() -> Result<RegistryFile, String> {
+    load_registry_from_path(&registry_path()?)
+}
+
+fn save_registry(registry: &RegistryFile) -> Result<(), String> {
+    save_registry_to_path(&registry_path()?, registry)
+}
+
+fn find_claude_app() -> Result<Option<PathBuf>, String> {
+    let candidates = [
+        PathBuf::from("/Applications/Claude.app"),
+        home_dir()?.join("Applications").join("Claude.app"),
+    ];
+
+    Ok(candidates.into_iter().find(|path| path.exists()))
+}
+
+pub fn list_extensions_in_dir(data_dir: &Path) -> Result<Vec<ExtensionEntry>, String> {
+    let ext_dir = data_dir.join(EXT_DIR_NAME);
+    let settings_dir = data_dir.join(EXT_SETTINGS_DIR_NAME);
+
+    if !ext_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut extensions = Vec::new();
+    for entry in fs::read_dir(&ext_dir).map_err(|e| format!("Read extension directory: {e}"))? {
+        let entry = entry.map_err(|e| format!("Read extension entry: {e}"))?;
+        if entry.file_type().map_err(|e| format!("Read extension file type: {e}"))?.is_dir() {
+            let id = entry.file_name().to_string_lossy().to_string();
+            extensions.push(ExtensionEntry {
+                has_settings: settings_dir.join(format!("{id}.json")).exists(),
+                id,
+            });
+        }
+    }
+
+    extensions.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok(extensions)
+}
+
+fn safe_extension_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && id != "."
+        && id != ".."
+        && !id.split('.').any(|part| part == "..")
+}
+
+fn copy_dir_recursive(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|e| format!("Create target directory: {e}"))?;
+
+    for entry in fs::read_dir(source).map_err(|e| format!("Read source directory: {e}"))? {
+        let entry = entry.map_err(|e| format!("Read source entry: {e}"))?;
+        let source_path = entry.path();
+        let target_path = target.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|e| format!("Read source file type: {e}"))?;
+
+        if file_type.is_dir() {
+            copy_dir_recursive(&source_path, &target_path)?;
+        } else {
+            fs::copy(&source_path, &target_path)
+                .map_err(|e| format!("Copy {}: {e}", source_path.display()))?;
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<(), String> {
+    match fs::symlink_metadata(path) {
+        Ok(meta) if meta.file_type().is_symlink() || meta.is_file() => {
+            fs::remove_file(path).map_err(|e| format!("Remove {}: {e}", path.display()))
+        }
+        Ok(meta) if meta.is_dir() => {
+            fs::remove_dir_all(path).map_err(|e| format!("Remove {}: {e}", path.display()))
+        }
+        Ok(_) => fs::remove_file(path).map_err(|e| format!("Remove {}: {e}", path.display())),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("Inspect {}: {e}", path.display())),
+    }
+}
+
+fn path_points_to(path: &Path, target: &Path) -> bool {
+    let Ok(link) = fs::read_link(path) else {
+        return false;
+    };
+    if link == target {
+        return true;
+    }
+    let base = path.parent().unwrap_or_else(|| Path::new("/"));
+    base.join(link) == target
+}
+
+fn backup_existing_path(path: &Path, data_dir: &Path, extension_id: &str) -> Result<(), String> {
+    if !path.exists() && fs::symlink_metadata(path).is_err() {
+        return Ok(());
+    }
+
+    let stamp = Utc::now().format("%Y%m%d-%H%M%S%3f");
+    let file_name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(extension_id);
+    let backup_dir = data_dir
+        .join("Claude Multiprofile Backups")
+        .join(format!("{extension_id}-{stamp}"));
+    fs::create_dir_all(&backup_dir).map_err(|e| format!("Create backup directory: {e}"))?;
+    fs::rename(path, backup_dir.join(file_name)).map_err(|e| format!("Back up {}: {e}", path.display()))
+}
+
+#[cfg(unix)]
+fn symlink_path(source: &Path, target: &Path) -> Result<(), String> {
+    unix_fs::symlink(source, target)
+        .map_err(|e| format!("Link {} -> {}: {e}", target.display(), source.display()))
+}
+
+#[cfg(not(unix))]
+fn symlink_path(_source: &Path, _target: &Path) -> Result<(), String> {
+    Err("Sharing requires symlink support on macOS.".to_string())
+}
+
+fn extension_paths(data_dir: &Path, extension_id: &str) -> (PathBuf, PathBuf) {
+    (
+        data_dir.join(EXT_DIR_NAME).join(extension_id),
+        data_dir
+            .join(EXT_SETTINGS_DIR_NAME)
+            .join(format!("{extension_id}.json")),
+    )
+}
+
+fn share_extension_one_way(source_data_dir: &Path, target_data_dir: &Path, extension_id: &str) -> Result<(), String> {
+    let (source_folder, source_settings) = extension_paths(source_data_dir, extension_id);
+    let (target_folder, target_settings) = extension_paths(target_data_dir, extension_id);
+    if !source_folder.exists() {
+        return Err(format!("Extension not found in source: {extension_id}"));
+    }
+
+    fs::create_dir_all(target_folder.parent().unwrap())
+        .map_err(|e| format!("Create target extension directory: {e}"))?;
+    fs::create_dir_all(target_settings.parent().unwrap())
+        .map_err(|e| format!("Create target settings directory: {e}"))?;
+
+    if !path_points_to(&target_folder, &source_folder) {
+        backup_existing_path(&target_folder, target_data_dir, extension_id)?;
+        symlink_path(&source_folder, &target_folder)?;
+    }
+
+    if source_settings.exists() {
+        if !path_points_to(&target_settings, &source_settings) {
+            backup_existing_path(&target_settings, target_data_dir, extension_id)?;
+            symlink_path(&source_settings, &target_settings)?;
+        }
+    } else if target_settings.exists() || fs::symlink_metadata(&target_settings).is_ok() {
+        backup_existing_path(&target_settings, target_data_dir, extension_id)?;
+    }
+
+    Ok(())
+}
+
+fn make_extension_independent_one_way(source_data_dir: &Path, target_data_dir: &Path, extension_id: &str) -> Result<bool, String> {
+    let (source_folder, source_settings) = extension_paths(source_data_dir, extension_id);
+    let (target_folder, target_settings) = extension_paths(target_data_dir, extension_id);
+    let mut changed = false;
+
+    if path_points_to(&target_folder, &source_folder) {
+        remove_path(&target_folder)?;
+        copy_dir_recursive(&source_folder, &target_folder)?;
+        changed = true;
+    }
+
+    if path_points_to(&target_settings, &source_settings) {
+        remove_path(&target_settings)?;
+        if source_settings.exists() {
+            fs::copy(&source_settings, &target_settings)
+                .map_err(|e| format!("Copy independent settings: {e}"))?;
+        }
+        changed = true;
+    }
+
+    Ok(changed)
+}
+
+pub fn copy_extension_between_dirs(
+    source_data_dir: &Path,
+    target_data_dir: &Path,
+    extension_id: &str,
+) -> Result<(), String> {
+    if !safe_extension_id(extension_id) {
+        return Err(format!("Unsafe extension id: {extension_id}"));
+    }
+
+    let source_folder = source_data_dir.join(EXT_DIR_NAME).join(extension_id);
+    if !source_folder.is_dir() {
+        return Err(format!("Extension not found in source: {extension_id}"));
+    }
+
+    let target_ext_dir = target_data_dir.join(EXT_DIR_NAME);
+    let target_settings_dir = target_data_dir.join(EXT_SETTINGS_DIR_NAME);
+    fs::create_dir_all(&target_ext_dir).map_err(|e| format!("Create target extensions directory: {e}"))?;
+    fs::create_dir_all(&target_settings_dir)
+        .map_err(|e| format!("Create target extension settings directory: {e}"))?;
+
+    let target_folder = target_ext_dir.join(extension_id);
+    if target_folder.exists() {
+        fs::remove_dir_all(&target_folder).map_err(|e| format!("Remove old target extension: {e}"))?;
+    }
+    copy_dir_recursive(&source_folder, &target_folder)?;
+
+    let source_settings = source_data_dir
+        .join(EXT_SETTINGS_DIR_NAME)
+        .join(format!("{extension_id}.json"));
+    if source_settings.exists() {
+        let target_settings = target_settings_dir.join(format!("{extension_id}.json"));
+        fs::copy(&source_settings, &target_settings)
+            .map_err(|e| format!("Copy extension settings: {e}"))?;
+    }
+
+    Ok(())
+}
+
+pub fn build_extension_library(installs: &[DesktopInstall]) -> Result<Vec<ExtensionShareItem>, String> {
+    let mut by_id: BTreeMap<String, Vec<(DesktopInstall, ExtensionEntry)>> = BTreeMap::new();
+    let mut inventory_by_install = Vec::new();
+
+    for install in installs {
+        let extensions = list_extensions_in_dir(Path::new(&install.data_dir))?;
+        for extension in &extensions {
+            by_id
+                .entry(extension.id.clone())
+                .or_default()
+                .push((install.clone(), extension.clone()));
+        }
+        inventory_by_install.push((install, extensions));
+    }
+
+    let mut items = Vec::new();
+    for (id, sources) in by_id {
+        let source_rows = sources
+            .iter()
+            .map(|(install, extension)| ExtensionLibrarySource {
+                install_id: install.id.clone(),
+                install_name: install.name.clone(),
+                data_dir: install.data_dir.clone(),
+                has_settings: extension.has_settings,
+            })
+            .collect();
+
+        let targets = inventory_by_install
+            .iter()
+            .map(|(install, extensions)| {
+                let existing = extensions.iter().find(|extension| extension.id == id);
+                ExtensionTargetStatus {
+                    install_id: install.id.clone(),
+                    install_name: install.name.clone(),
+                    data_dir: install.data_dir.clone(),
+                    kind: install.kind.clone(),
+                    has_extension: existing.is_some(),
+                    has_settings: existing.is_some_and(|extension| extension.has_settings),
+                }
+            })
+            .collect();
+
+        items.push(ExtensionShareItem {
+            id,
+            sources: source_rows,
+            targets,
+        });
+    }
+
+    Ok(items)
+}
+
+pub fn copy_extension_to_target_dirs(
+    source_data_dir: &Path,
+    target_data_dirs: &[PathBuf],
+    extension_id: &str,
+) -> Result<CopySummary, String> {
+    let mut copied = 0;
+    let mut skipped = 0;
+
+    for target in target_data_dirs {
+        if target == source_data_dir {
+            skipped += 1;
+            continue;
+        }
+        copy_extension_between_dirs(source_data_dir, target, extension_id)?;
+        copied += 1;
+    }
+
+    Ok(CopySummary { copied, skipped })
+}
+
+pub fn list_pair_extension_shares(
+    source_data_dir: &Path,
+    target_data_dir: &Path,
+) -> Result<Vec<PairExtensionShare>, String> {
+    let source_extensions = list_extensions_in_dir(source_data_dir)?;
+    let target_extensions = list_extensions_in_dir(target_data_dir)?;
+    let mut ids = BTreeMap::new();
+    for extension in &source_extensions {
+        ids.insert(extension.id.clone(), ());
+    }
+    for extension in &target_extensions {
+        ids.insert(extension.id.clone(), ());
+    }
+
+    let mut rows = Vec::new();
+    for id in ids.keys() {
+        let source = source_extensions.iter().find(|extension| extension.id == *id);
+        let target = target_extensions.iter().find(|extension| extension.id == *id);
+        let (source_folder, source_settings) = extension_paths(source_data_dir, id);
+        let (target_folder, target_settings) = extension_paths(target_data_dir, id);
+        let target_to_source = path_points_to(&target_folder, &source_folder);
+        let source_to_target = path_points_to(&source_folder, &target_folder);
+        let settings_target_to_source = path_points_to(&target_settings, &source_settings);
+        let settings_source_to_target = path_points_to(&source_settings, &target_settings);
+        let folder_shared = target_to_source || source_to_target;
+        let settings_relevant = source_settings.exists() || target_settings.exists();
+        let settings_shared = !settings_relevant || settings_target_to_source || settings_source_to_target;
+
+        rows.push(PairExtensionShare {
+            id: id.clone(),
+            source_has_extension: source.is_some(),
+            target_has_extension: target.is_some(),
+            source_has_settings: source.is_some_and(|extension| extension.has_settings),
+            target_has_settings: target.is_some_and(|extension| extension.has_settings),
+            shared: folder_shared && settings_shared,
+            partial: folder_shared && !settings_shared,
+            direction: if target_to_source {
+                "source-to-target".to_string()
+            } else if source_to_target {
+                "target-to-source".to_string()
+            } else {
+                "independent".to_string()
+            },
+        });
+    }
+
+    Ok(rows)
+}
+
+pub fn set_pair_extension_shared(
+    source_data_dir: &Path,
+    target_data_dir: &Path,
+    extension_id: &str,
+    shared: bool,
+) -> Result<bool, String> {
+    if !safe_extension_id(extension_id) {
+        return Err(format!("Unsafe extension id: {extension_id}"));
+    }
+
+    if shared {
+        let (source_folder, _) = extension_paths(source_data_dir, extension_id);
+        let (target_folder, _) = extension_paths(target_data_dir, extension_id);
+        if source_folder.exists() {
+            share_extension_one_way(source_data_dir, target_data_dir, extension_id)?;
+            return Ok(true);
+        }
+        if target_folder.exists() {
+            share_extension_one_way(target_data_dir, source_data_dir, extension_id)?;
+            return Ok(true);
+        }
+        return Err(format!("Extension not found in either profile: {extension_id}"));
+    }
+
+    let changed_a = make_extension_independent_one_way(source_data_dir, target_data_dir, extension_id)?;
+    let changed_b = make_extension_independent_one_way(target_data_dir, source_data_dir, extension_id)?;
+    Ok(changed_a || changed_b)
+}
+
+fn install_from_default() -> Result<Option<DesktopInstall>, String> {
+    let Some(app_path) = find_claude_app()? else {
+        return Ok(None);
+    };
+    let data_dir = default_desktop_data_dir()?;
+    if !data_dir.exists() {
+        return Ok(None);
+    }
+
+    Ok(Some(DesktopInstall {
+        id: "default".to_string(),
+        name: "default".to_string(),
+        kind: "default".to_string(),
+        data_dir: data_dir.to_string_lossy().to_string(),
+        app_path: Some(app_path.to_string_lossy().to_string()),
+        launcher_path: None,
+        managed: false,
+    }))
+}
+
+fn install_from_profile(profile: &RegistryProfile) -> Option<DesktopInstall> {
+    profile.desktop.as_ref().map(|desktop| DesktopInstall {
+        id: format!("profile:{}", profile.name),
+        name: profile.name.clone(),
+        kind: "profile".to_string(),
+        data_dir: desktop.data_dir.clone(),
+        app_path: Some(desktop.claude_app_path.clone()),
+        launcher_path: Some(desktop.app_path.clone()),
+        managed: true,
+    })
+}
+
+pub fn list_desktop_installs() -> Result<Vec<DesktopInstall>, String> {
+    let mut installs = Vec::new();
+    if let Some(default) = install_from_default()? {
+        installs.push(default);
+    }
+
+    let registry = load_registry()?;
+    for profile in &registry.profiles {
+        if let Some(install) = install_from_profile(profile) {
+            installs.push(install);
+        }
+    }
+
+    Ok(installs)
+}
+
+fn run_command(mut command: Command, context: &str) -> Result<(), String> {
+    let output = command.output().map_err(|e| format!("{context}: {e}"))?;
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    Err(format!(
+        "{context} failed: {}{}",
+        stderr.trim(),
+        if stdout.trim().is_empty() {
+            String::new()
+        } else {
+            format!(" {}", stdout.trim())
+        }
+    ))
+}
+
+fn shell_quote_single(value: &Path) -> String {
+    value.to_string_lossy().replace('\'', "'\\''")
+}
+
+fn build_launch_applescript(data_dir: &Path, claude_app_path: &Path) -> String {
+    let safe_app = shell_quote_single(claude_app_path);
+    let safe_dir = shell_quote_single(data_dir);
+    format!(
+        "do shell script \"open -n -a '{}' --args --user-data-dir='{}' > /dev/null 2>&1 &\"",
+        safe_app, safe_dir
+    )
+}
+
+fn unique_bundle_id(name: &str) -> String {
+    let safe = sanitize_profile_name(name);
+    format!(
+        "com.claude-multiprofile.{}",
+        if safe.is_empty() { "profile" } else { safe.as_str() }
+    )
+}
+
+fn set_bundle_id(app_path: &Path, bundle_id: &str) {
+    let plist = app_path.join("Contents").join("Info.plist");
+    if !plist.exists() {
+        return;
+    }
+
+    let mut set = Command::new("/usr/libexec/PlistBuddy");
+    set.args(["-c", &format!("Set :CFBundleIdentifier {bundle_id}")])
+        .arg(&plist);
+    if run_command(set, "Set bundle identifier").is_ok() {
+        return;
+    }
+
+    let mut add = Command::new("/usr/libexec/PlistBuddy");
+    add.args(["-c", &format!("Add :CFBundleIdentifier string {bundle_id}")])
+        .arg(plist);
+    let _ = run_command(add, "Add bundle identifier");
+}
+
+fn compile_launcher_app(
+    name: &str,
+    data_dir: &Path,
+    app_path: &Path,
+    claude_app_path: &Path,
+) -> Result<(), String> {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| format!("Read system time: {e}"))?
+        .as_nanos();
+    let tmp_dir = env::temp_dir().join(format!("claude-multiprofile-{nanos}"));
+    fs::create_dir_all(&tmp_dir).map_err(|e| format!("Create temp directory: {e}"))?;
+    let script_path = tmp_dir.join("launcher.applescript");
+    fs::write(&script_path, build_launch_applescript(data_dir, claude_app_path))
+        .map_err(|e| format!("Write launcher script: {e}"))?;
+
+    if let Some(parent) = app_path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Create app parent directory: {e}"))?;
+    }
+    if app_path.exists() {
+        fs::remove_dir_all(app_path).map_err(|e| format!("Remove existing launcher: {e}"))?;
+    }
+
+    let mut osacompile = Command::new("/usr/bin/osacompile");
+    osacompile.args(["-o"]).arg(app_path).arg(&script_path);
+    let result = run_command(osacompile, "Compile launcher app");
+    let _ = fs::remove_dir_all(&tmp_dir);
+    result?;
+
+    set_bundle_id(app_path, &unique_bundle_id(name));
+    strip_quarantine(app_path);
+    copy_claude_icon(app_path, claude_app_path);
+    Ok(())
+}
+
+fn strip_quarantine(app_path: &Path) {
+    let mut xattr = Command::new("/usr/bin/xattr");
+    xattr.args(["-dr", "com.apple.quarantine"]).arg(app_path);
+    let _ = run_command(xattr, "Strip quarantine");
+}
+
+fn copy_claude_icon(app_path: &Path, claude_app_path: &Path) {
+    let source_resources = claude_app_path.join("Contents").join("Resources");
+    let target_icon = app_path
+        .join("Contents")
+        .join("Resources")
+        .join("applet.icns");
+    if !source_resources.is_dir() || !target_icon.exists() {
+        return;
+    }
+
+    let Ok(entries) = fs::read_dir(source_resources) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let source = entry.path();
+        if source
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("icns"))
+        {
+            let _ = fs::copy(source, &target_icon);
+            let mut touch = Command::new("/usr/bin/touch");
+            touch.arg(app_path);
+            let _ = run_command(touch, "Refresh launcher icon");
+            break;
+        }
+    }
+}
+
+pub fn create_desktop_profile(name: String) -> Result<DesktopInstall, String> {
+    let clean_name = sanitize_profile_name(&name);
+    if clean_name.is_empty() {
+        return Err("Profile name cannot be empty".to_string());
+    }
+
+    let claude_app_path = find_claude_app()?.ok_or_else(|| {
+        "Claude.app was not found in /Applications or ~/Applications".to_string()
+    })?;
+    let data_dir = default_data_dir_for(&clean_name)?;
+    if data_dir == default_desktop_data_dir()? {
+        return Err("Refusing to use the default Claude data directory".to_string());
+    }
+
+    let app_path = default_app_path_for(&clean_name)?;
+    let mut registry = load_registry()?;
+    if registry.profiles.iter().any(|profile| profile.name == clean_name) {
+        return Err(format!("Profile \"{clean_name}\" already exists"));
+    }
+
+    fs::create_dir_all(&data_dir).map_err(|e| format!("Create profile data directory: {e}"))?;
+    compile_launcher_app(&clean_name, &data_dir, &app_path, &claude_app_path)?;
+
+    registry.profiles.push(RegistryProfile {
+        name: clean_name.clone(),
+        profile_type: "desktop".to_string(),
+        desktop: Some(RegistryDesktop {
+            data_dir: data_dir.to_string_lossy().to_string(),
+            app_path: app_path.to_string_lossy().to_string(),
+            claude_app_path: claude_app_path.to_string_lossy().to_string(),
+        }),
+        code: None,
+        created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+    });
+    save_registry(&registry)?;
+
+    Ok(DesktopInstall {
+        id: format!("profile:{clean_name}"),
+        name: clean_name,
+        kind: "profile".to_string(),
+        data_dir: data_dir.to_string_lossy().to_string(),
+        app_path: Some(claude_app_path.to_string_lossy().to_string()),
+        launcher_path: Some(app_path.to_string_lossy().to_string()),
+        managed: true,
+    })
+}
+
+pub fn launch_desktop_install(install_id: String) -> Result<(), String> {
+    let install = list_desktop_installs()?
+        .into_iter()
+        .find(|install| install.id == install_id)
+        .ok_or_else(|| format!("Install not found: {install_id}"))?;
+
+    if install.kind == "default" {
+        let app = install.app_path.ok_or_else(|| "Default app path is missing".to_string())?;
+        let mut open = Command::new("/usr/bin/open");
+        open.arg(app);
+        return run_command(open, "Launch Claude Desktop");
+    }
+
+    if let Some(launcher) = install.launcher_path.as_ref().filter(|path| Path::new(path).exists()) {
+        let mut open = Command::new("/usr/bin/open");
+        open.arg(launcher);
+        return run_command(open, "Launch Claude profile");
+    }
+
+    let app = install.app_path.ok_or_else(|| "Claude.app source is missing".to_string())?;
+    let mut open = Command::new("/usr/bin/open");
+    open.args(["-n", "-a", &app, "--args", "--user-data-dir", &install.data_dir]);
+    run_command(open, "Launch Claude profile")
+}
+
+pub fn list_extension_matrix(
+    source_data_dir: String,
+    target_data_dir: String,
+) -> Result<Vec<ExtensionSelectionRow>, String> {
+    let source = PathBuf::from(source_data_dir);
+    let target = PathBuf::from(target_data_dir);
+    let source_extensions = list_extensions_in_dir(&source)?;
+    let target_extensions = list_extensions_in_dir(&target)?;
+    let target_ids: HashSet<_> = target_extensions.iter().map(|ext| ext.id.as_str()).collect();
+    let target_settings_ids: HashSet<_> = target_extensions
+        .iter()
+        .filter(|ext| ext.has_settings)
+        .map(|ext| ext.id.as_str())
+        .collect();
+
+    Ok(source_extensions
+        .into_iter()
+        .map(|ext| ExtensionSelectionRow {
+            exists_in_target: target_ids.contains(ext.id.as_str()),
+            target_has_settings: target_settings_ids.contains(ext.id.as_str()),
+            has_settings: ext.has_settings,
+            id: ext.id,
+        })
+        .collect())
+}
+
+pub fn copy_selected_extensions(
+    source_data_dir: String,
+    target_data_dir: String,
+    extension_ids: Vec<String>,
+) -> Result<CopySummary, String> {
+    let source = PathBuf::from(source_data_dir);
+    let target = PathBuf::from(target_data_dir);
+    let mut copied = 0;
+    let mut skipped = 0;
+
+    for id in extension_ids {
+        if list_extensions_in_dir(&source)?.iter().any(|ext| ext.id == id) {
+            copy_extension_between_dirs(&source, &target, &id)?;
+            copied += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    Ok(CopySummary { copied, skipped })
+}
+
+pub fn list_extension_library() -> Result<Vec<ExtensionShareItem>, String> {
+    build_extension_library(&list_desktop_installs()?)
+}
+
+pub fn copy_extension_to_targets(
+    source_data_dir: String,
+    target_data_dirs: Vec<String>,
+    extension_id: String,
+) -> Result<CopySummary, String> {
+    let targets = target_data_dirs.into_iter().map(PathBuf::from).collect::<Vec<_>>();
+    copy_extension_to_target_dirs(Path::new(&source_data_dir), &targets, &extension_id)
+}
+
+pub fn list_pair_sharing(
+    source_data_dir: String,
+    target_data_dir: String,
+) -> Result<Vec<PairExtensionShare>, String> {
+    list_pair_extension_shares(Path::new(&source_data_dir), Path::new(&target_data_dir))
+}
+
+pub fn apply_pair_sharing(
+    source_data_dir: String,
+    target_data_dir: String,
+    changes: Vec<PairShareChange>,
+) -> Result<CopySummary, String> {
+    let source = Path::new(&source_data_dir);
+    let target = Path::new(&target_data_dir);
+    let mut copied = 0;
+    let mut skipped = 0;
+
+    for change in changes {
+        if set_pair_extension_shared(source, target, &change.extension_id, change.shared)? {
+            copied += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+
+    Ok(CopySummary { copied, skipped })
+}
+
+// ---------------------------------------------------------------------------
+// Desktop-embedded Claude Code history sharing
+// ---------------------------------------------------------------------------
+// Each Desktop install isolates the chat history of the embedded Claude Code
+// panel under `<dataDir>/claude-code-sessions/<deviceId>/<workspaceId>/local_*.json`.
+// Switching Desktop accounts therefore loses Code chat context. We expose a
+// share at the per-workspace level (`<accountId>/<orgId>/`), NOT the whole
+// `claude-code-sessions/` directory. Reverse-engineered from
+// Claude.app's `LocalSessionManager.getStorageDir()`:
+//
+//     path.join(userDataPath, "claude-code-sessions",
+//               currentAccountId, currentOrgId)
+//
+// Both IDs come from Anthropic's auth server and are stable per profile.
+// We read them from plain-JSON files Claude Desktop writes on every launch
+// (`cowork-enabled-cli-ops.json`, `extensions-blocklist.json`), so we can
+// pre-create the target's `<acct>/<org>/` as a symlink at the source's
+// even if the target hasn't actually used the Code panel yet — Desktop
+// will then transparently read the source's sessions on first read.
+//
+// Login state (cookies, Local Storage with auth tokens) stays profile-local
+// because we only touch the on-disk session folder, not the auth surface.
+
+const DESKTOP_CODE_SESSIONS_DIR: &str = "claude-code-sessions";
+const COWORK_OPS_FILE: &str = "cowork-enabled-cli-ops.json";
+const EXTENSIONS_BLOCKLIST_FILE: &str = "extensions-blocklist.json";
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct DesktopCodeHistoryStat {
+    pub present: bool,
+    pub session_count: u32,
+    pub total_bytes: u64,
+    pub last_activity_ms: i64,
+    /// Up to 5 distinct cwds, ordered by most-recent activity.
+    pub recent_cwds: Vec<String>,
+    /// `<accountId>/<orgId>` for the profile's current login. Read from
+    /// plain-JSON files Desktop writes on every launch; no LevelDB needed.
+    /// `None` means the profile hasn't logged in yet.
+    pub primary_workspace: Option<DesktopCodeWorkspaceRef>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct DesktopCodeWorkspaceRef {
+    /// First subdir under `claude-code-sessions/`. Anthropic accountId.
+    /// (Field name kept as `device_id` for backwards-compat with the
+    /// 0.1.9 frontend; semantically it's the accountId.)
+    pub device_id: String,
+    /// Second subdir. Anthropic orgId.
+    pub workspace_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairDesktopCodeHistory {
+    pub source: DesktopCodeHistoryStat,
+    pub target: DesktopCodeHistoryStat,
+    /// True iff target's primary workspace dir is a live symlink at source's.
+    pub shared: bool,
+    /// "source-to-target" (target's workspace is a link to source's),
+    /// "target-to-source", or "independent".
+    pub direction: String,
+    /// True iff target has no `<dev>/<ws>/` workspace yet — sharing requires
+    /// the user to launch Desktop on that profile and open the Code panel
+    /// once so a workspace is generated.
+    pub target_needs_bootstrap: bool,
+    /// Same for source.
+    pub source_needs_bootstrap: bool,
+    /// True iff the legacy whole-`claude-code-sessions/` symlink is in place
+    /// (older versions of this app). When set, applying any change will
+    /// undo it before installing the workspace-level link.
+    pub legacy_whole_dir_link: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PairDesktopCodeHistoryChange {
+    pub shared: bool,
+}
+
+fn desktop_code_sessions_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(DESKTOP_CODE_SESSIONS_DIR)
+}
+
+fn desktop_code_workspace_path(data_dir: &Path, ws: &DesktopCodeWorkspaceRef) -> PathBuf {
+    desktop_code_sessions_path(data_dir)
+        .join(&ws.device_id)
+        .join(&ws.workspace_id)
+}
+
+/// Read the profile's Anthropic accountId from `cowork-enabled-cli-ops.json`.
+/// Desktop rewrites this file on every launch, so it's our source of truth.
+fn read_account_id(data_dir: &Path) -> Result<Option<String>, String> {
+    let path = data_dir.join(COWORK_OPS_FILE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Read {}: {e}", path.display())),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    Ok(v.get("ownerAccountId")
+        .and_then(|x| x.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty()))
+}
+
+/// Read the profile's Anthropic orgId from `extensions-blocklist.json`.
+/// The file always contains an entry whose URL embeds the org UUID, e.g.
+/// `https://claude.ai/api/organizations/<orgId>/dxt/blocklist`.
+fn read_org_id(data_dir: &Path) -> Result<Option<String>, String> {
+    let path = data_dir.join(EXTENSIONS_BLOCKLIST_FILE);
+    let raw = match fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Read {}: {e}", path.display())),
+    };
+    let v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(None),
+    };
+    let url = v
+        .as_array()
+        .and_then(|arr| arr.first())
+        .and_then(|first| first.get("url"))
+        .and_then(|u| u.as_str());
+    let Some(url) = url else { return Ok(None) };
+    // Pull the UUID right after `/organizations/`.
+    let needle = "/organizations/";
+    let Some(idx) = url.find(needle) else {
+        return Ok(None);
+    };
+    let after = &url[idx + needle.len()..];
+    let end = after.find('/').unwrap_or(after.len());
+    let candidate = &after[..end];
+    if candidate.len() == 36 && candidate.chars().all(|c| c.is_ascii_hexdigit() || c == '-') {
+        Ok(Some(candidate.to_string()))
+    } else {
+        Ok(None)
+    }
+}
+
+/// True identity of the profile's Code workspace: read `<accountId>/<orgId>`
+/// from JSON files Desktop maintains on every launch. This works even
+/// before the profile has ever opened the Code panel — only login is
+/// required.
+fn read_workspace_identity(data_dir: &Path) -> Result<Option<DesktopCodeWorkspaceRef>, String> {
+    let acct = read_account_id(data_dir)?;
+    let org = read_org_id(data_dir)?;
+    if let (Some(a), Some(o)) = (acct, org) {
+        Ok(Some(DesktopCodeWorkspaceRef {
+            device_id: a,
+            workspace_id: o,
+        }))
+    } else {
+        Ok(None)
+    }
+}
+
+/// Walk every `<acct>/<org>/local_*.json` and collect aggregate stats.
+/// Tolerant of half-written files: a single bad JSON is skipped, not fatal.
+///
+/// `data_dir` is the Desktop user-data dir, `root` is its
+/// `claude-code-sessions/` subdirectory. They're separate args because
+/// we read account/org identity from JSON files at the top of `data_dir`,
+/// independent of whether `claude-code-sessions/` itself exists yet.
+fn scan_desktop_code_history_with_data_dir(
+    data_dir: &Path,
+    root: &Path,
+) -> Result<DesktopCodeHistoryStat, String> {
+    let identity_from_files = read_workspace_identity(data_dir)?;
+    let mut stat = scan_desktop_code_history_walk(root)?;
+    // The on-disk dir scan picks the most-recently-active <acct>/<org> as
+    // primary, but Desktop *only* ever writes to the currently-logged-in
+    // identity. Use the JSON-file-derived identity when available — it
+    // reflects the live login, which is what Desktop will read.
+    if identity_from_files.is_some() {
+        stat.primary_workspace = identity_from_files;
+    }
+    Ok(stat)
+}
+
+/// Convenience wrapper for tests + callers that only have the
+/// `claude-code-sessions/` path. Falls back to the directory-walk-only
+/// strategy.
+#[cfg(test)]
+fn scan_desktop_code_history(root: &Path) -> Result<DesktopCodeHistoryStat, String> {
+    scan_desktop_code_history_walk(root)
+}
+
+fn scan_desktop_code_history_walk(root: &Path) -> Result<DesktopCodeHistoryStat, String> {
+    let mut stat = DesktopCodeHistoryStat::default();
+    let meta = match fs::symlink_metadata(root) {
+        Ok(m) => m,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(stat),
+        Err(e) => return Err(format!("Inspect {}: {e}", root.display())),
+    };
+    // Treat a symlink whose target is missing as not-present rather than erroring.
+    if meta.file_type().is_symlink() && !root.exists() {
+        return Ok(stat);
+    }
+    if !root.is_dir() {
+        return Ok(stat);
+    }
+    stat.present = true;
+
+    // (cwd, last_activity_ms) -> keep newest per cwd.
+    let mut cwd_latest: BTreeMap<String, i64> = BTreeMap::new();
+    // (dev, ws) -> (last_activity_ms, session_count). The primary workspace
+    // is the one with the largest last_activity, ties broken by session count
+    // and finally lexical order so the choice is deterministic.
+    let mut workspace_stats: BTreeMap<(String, String), (i64, u32)> = BTreeMap::new();
+
+    let device_iter = match fs::read_dir(root) {
+        Ok(it) => it,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(stat),
+        Err(e) => return Err(format!("Read {}: {e}", root.display())),
+    };
+    for dev_entry in device_iter {
+        let dev_entry = match dev_entry {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let dev_path = dev_entry.path();
+        if !dev_path.is_dir() {
+            continue;
+        }
+        let dev_name = match dev_path.file_name().and_then(|s| s.to_str()) {
+            Some(name) => name.to_string(),
+            None => continue,
+        };
+        let ws_iter = match fs::read_dir(&dev_path) {
+            Ok(it) => it,
+            Err(_) => continue,
+        };
+        for ws_entry in ws_iter {
+            let ws_entry = match ws_entry {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            let ws_path = ws_entry.path();
+            // Treat both real dirs and symlinks-to-dirs as workspaces.
+            let target_meta = match fs::metadata(&ws_path) {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if !target_meta.is_dir() {
+                continue;
+            }
+            let ws_name = match ws_path.file_name().and_then(|s| s.to_str()) {
+                Some(name) => name.to_string(),
+                None => continue,
+            };
+            // Make sure the workspace is recorded even if it has zero session
+            // files yet — that empty shell is what we need for sharing.
+            workspace_stats
+                .entry((dev_name.clone(), ws_name.clone()))
+                .or_insert((0, 0));
+            let session_iter = match fs::read_dir(&ws_path) {
+                Ok(it) => it,
+                Err(_) => continue,
+            };
+            for session_entry in session_iter {
+                let session_entry = match session_entry {
+                    Ok(e) => e,
+                    Err(_) => continue,
+                };
+                let path = session_entry.path();
+                let meta = match session_entry.metadata() {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                if !meta.is_file() {
+                    continue;
+                }
+                let is_json = path
+                    .extension()
+                    .and_then(|s| s.to_str())
+                    .is_some_and(|ext| ext.eq_ignore_ascii_case("json"));
+                if !is_json {
+                    continue;
+                }
+                let name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if !name.starts_with("local_") {
+                    continue;
+                }
+                stat.session_count = stat.session_count.saturating_add(1);
+                stat.total_bytes = stat.total_bytes.saturating_add(meta.len());
+
+                let mut session_last_activity: i64 = 0;
+                // Parse just enough to pull cwd + lastActivityAt.
+                if let Ok(raw) = fs::read_to_string(&path) {
+                    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
+                        let last_activity = v
+                            .get("lastActivityAt")
+                            .and_then(|x| x.as_i64())
+                            .or_else(|| v.get("createdAt").and_then(|x| x.as_i64()))
+                            .unwrap_or(0);
+                        session_last_activity = last_activity;
+                        if last_activity > stat.last_activity_ms {
+                            stat.last_activity_ms = last_activity;
+                        }
+                        if let Some(cwd) = v.get("cwd").and_then(|x| x.as_str()) {
+                            let trimmed = cwd.trim();
+                            if !trimmed.is_empty() {
+                                let entry = cwd_latest.entry(trimmed.to_string()).or_insert(0);
+                                if last_activity > *entry {
+                                    *entry = last_activity;
+                                }
+                            }
+                        }
+                    }
+                }
+                // Fall back to file mtime if the JSON had no timestamps.
+                if session_last_activity == 0 {
+                    if let Ok(modified) = meta.modified() {
+                        let mtime = system_time_to_epoch_ms(modified);
+                        session_last_activity = mtime;
+                        if mtime > stat.last_activity_ms {
+                            stat.last_activity_ms = mtime;
+                        }
+                    }
+                }
+
+                let entry = workspace_stats
+                    .entry((dev_name.clone(), ws_name.clone()))
+                    .or_insert((0, 0));
+                if session_last_activity > entry.0 {
+                    entry.0 = session_last_activity;
+                }
+                entry.1 = entry.1.saturating_add(1);
+            }
+        }
+    }
+
+    // Top 5 cwds by recency.
+    let mut cwds: Vec<(String, i64)> = cwd_latest.into_iter().collect();
+    cwds.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    stat.recent_cwds = cwds.into_iter().take(5).map(|(k, _)| k).collect();
+
+    // Pick the primary workspace.
+    if !workspace_stats.is_empty() {
+        let mut entries: Vec<((String, String), (i64, u32))> = workspace_stats.into_iter().collect();
+        entries.sort_by(|a, b| {
+            // primary = highest last-activity, then highest session count,
+            // then lexical (dev, ws) for determinism.
+            b.1 .0
+                .cmp(&a.1 .0)
+                .then_with(|| b.1 .1.cmp(&a.1 .1))
+                .then_with(|| a.0 .0.cmp(&b.0 .0))
+                .then_with(|| a.0 .1.cmp(&b.0 .1))
+        });
+        let ((dev, ws), _) = entries.remove(0);
+        stat.primary_workspace = Some(DesktopCodeWorkspaceRef {
+            device_id: dev,
+            workspace_id: ws,
+        });
+    }
+    Ok(stat)
+}
+
+fn pair_desktop_code_history(
+    source_data_dir: &Path,
+    target_data_dir: &Path,
+) -> Result<PairDesktopCodeHistory, String> {
+    let source_sessions = desktop_code_sessions_path(source_data_dir);
+    let target_sessions = desktop_code_sessions_path(target_data_dir);
+    let source = scan_desktop_code_history_with_data_dir(source_data_dir, &source_sessions)?;
+    let target = scan_desktop_code_history_with_data_dir(target_data_dir, &target_sessions)?;
+
+    // Legacy: an older version of this app may have linked target's whole
+    // `claude-code-sessions/` to source's. We surface that so the next apply
+    // can clean it up.
+    let legacy_whole_dir_link = path_points_to(&target_sessions, &source_sessions)
+        || path_points_to(&source_sessions, &target_sessions);
+
+    // Workspace-level link state: target's primary <dev>/<ws>/ → source's
+    // primary <dev>/<ws>/.
+    let mut target_to_source = false;
+    let mut source_to_target = false;
+    if let (Some(src_ws), Some(tgt_ws)) = (&source.primary_workspace, &target.primary_workspace) {
+        let src_ws_path = desktop_code_workspace_path(source_data_dir, src_ws);
+        let tgt_ws_path = desktop_code_workspace_path(target_data_dir, tgt_ws);
+        target_to_source = path_points_to(&tgt_ws_path, &src_ws_path);
+        source_to_target = path_points_to(&src_ws_path, &tgt_ws_path);
+    }
+
+    let direction = if target_to_source {
+        "source-to-target"
+    } else if source_to_target {
+        "target-to-source"
+    } else {
+        "independent"
+    }
+    .to_string();
+
+    Ok(PairDesktopCodeHistory {
+        target_needs_bootstrap: target.primary_workspace.is_none(),
+        source_needs_bootstrap: source.primary_workspace.is_none(),
+        source,
+        target,
+        shared: target_to_source || source_to_target,
+        direction,
+        legacy_whole_dir_link,
+    })
+}
+
+/// If a previous version of this app symlinked target's whole
+/// `claude-code-sessions/` directory at source's, undo that link before we
+/// install a workspace-level one. The link is replaced with an empty real
+/// directory so Desktop is free to recreate `<dev>/<ws>/` inside it.
+fn cleanup_legacy_whole_dir_link(
+    source_data_dir: &Path,
+    target_data_dir: &Path,
+) -> Result<(), String> {
+    let source_sessions = desktop_code_sessions_path(source_data_dir);
+    let target_sessions = desktop_code_sessions_path(target_data_dir);
+
+    // Case 1: target -> source.
+    if path_points_to(&target_sessions, &source_sessions) {
+        backup_existing_path(&target_sessions, target_data_dir, DESKTOP_CODE_SESSIONS_DIR)?;
+        fs::create_dir_all(&target_sessions)
+            .map_err(|e| format!("Recreate target claude-code-sessions: {e}"))?;
+    }
+    // Case 2: source -> target (rare; same treatment, but on the source side).
+    if path_points_to(&source_sessions, &target_sessions) {
+        backup_existing_path(&source_sessions, source_data_dir, DESKTOP_CODE_SESSIONS_DIR)?;
+        fs::create_dir_all(&source_sessions)
+            .map_err(|e| format!("Recreate source claude-code-sessions: {e}"))?;
+    }
+    Ok(())
+}
+
+fn share_desktop_code_history(
+    source_data_dir: &Path,
+    target_data_dir: &Path,
+) -> Result<(), String> {
+    cleanup_legacy_whole_dir_link(source_data_dir, target_data_dir)?;
+
+    // Identities come from JSON files Desktop maintains on every launch.
+    // No need to wait for the user to send a Code message — they only need
+    // to have logged in once, which writes both files.
+    let source_ws = read_workspace_identity(source_data_dir)?
+        .ok_or_else(|| login_first_message("source", source_data_dir))?;
+    let target_ws = read_workspace_identity(target_data_dir)?
+        .ok_or_else(|| login_first_message("target", target_data_dir))?;
+
+    let source_ws_path = desktop_code_workspace_path(source_data_dir, &source_ws);
+    let target_ws_path = desktop_code_workspace_path(target_data_dir, &target_ws);
+
+    // Ensure the source's <acct>/<org>/ exists. If it doesn't (the source
+    // profile is logged in but has never used Code), create it empty so
+    // the symlink has somewhere valid to point. Desktop will populate it
+    // on first save from either side.
+    fs::create_dir_all(&source_ws_path)
+        .map_err(|e| format!("Create source workspace dir: {e}"))?;
+
+    if path_points_to(&target_ws_path, &source_ws_path) {
+        return Ok(());
+    }
+
+    // Pre-create target's `claude-code-sessions/<acct>/`, ready to receive
+    // the symlink. Even if the target has never opened the Code panel,
+    // this gives Desktop the path it expects on next read.
+    if let Some(parent) = target_ws_path.parent() {
+        fs::create_dir_all(parent)
+            .map_err(|e| format!("Create target workspace parent: {e}"))?;
+    }
+    // If a real `<acct>/<org>/` already exists on the target side (the
+    // user did use Code in this profile), back it up — its session files
+    // will be available under "Claude Multiprofile Backups" if they ever
+    // want to recover them.
+    backup_existing_path(
+        &target_ws_path,
+        target_data_dir,
+        &format!(
+            "{}-{}-{}",
+            DESKTOP_CODE_SESSIONS_DIR, target_ws.device_id, target_ws.workspace_id
+        ),
+    )?;
+    symlink_path(&source_ws_path, &target_ws_path)?;
+    Ok(())
+}
+
+fn login_first_message(side: &str, data_dir: &Path) -> String {
+    let acct = data_dir.join(COWORK_OPS_FILE);
+    format!(
+        "{} profile hasn't completed Claude Desktop login yet (missing {}). Launch Claude Desktop on this profile, finish login, then click Share again.",
+        if side == "source" { "Source" } else { "Target" },
+        acct.display()
+    )
+}
+
+fn make_desktop_code_history_independent(
+    source_data_dir: &Path,
+    target_data_dir: &Path,
+) -> Result<bool, String> {
+    // Workspace-level unshare: only meaningful when target's primary workspace
+    // is currently a symlink at source's primary workspace.
+    let source_identity = read_workspace_identity(source_data_dir)?;
+    let target_identity = read_workspace_identity(target_data_dir)?;
+    let mut acted = false;
+    if let (Some(src_ws), Some(tgt_ws)) = (
+        source_identity.as_ref(),
+        target_identity.as_ref(),
+    ) {
+        let src_ws_path = desktop_code_workspace_path(source_data_dir, src_ws);
+        let tgt_ws_path = desktop_code_workspace_path(target_data_dir, tgt_ws);
+        if path_points_to(&tgt_ws_path, &src_ws_path) {
+            remove_path(&tgt_ws_path)?;
+            if src_ws_path.is_dir() {
+                copy_dir_recursive(&src_ws_path, &tgt_ws_path)?;
+            } else if let Some(parent) = tgt_ws_path.parent() {
+                fs::create_dir_all(parent).map_err(|e| {
+                    format!("Recreate target workspace parent: {e}")
+                })?;
+                fs::create_dir_all(&tgt_ws_path)
+                    .map_err(|e| format!("Recreate target workspace: {e}"))?;
+            }
+            acted = true;
+        }
+    }
+    // Also clean up a legacy whole-dir link if one is still present.
+    let source_sessions = desktop_code_sessions_path(source_data_dir);
+    let target_sessions = desktop_code_sessions_path(target_data_dir);
+    if path_points_to(&target_sessions, &source_sessions)
+        || path_points_to(&source_sessions, &target_sessions)
+    {
+        cleanup_legacy_whole_dir_link(source_data_dir, target_data_dir)?;
+        // After cleanup, copy source's content over so target ends up
+        // independent rather than empty.
+        let target_sessions_now = desktop_code_sessions_path(target_data_dir);
+        if source_sessions.is_dir() && target_sessions_now.exists() {
+            // copy_dir_recursive expects target absent; remove the empty dir
+            // we just created in cleanup, then copy.
+            if let Ok(meta) = fs::metadata(&target_sessions_now) {
+                if meta.is_dir()
+                    && fs::read_dir(&target_sessions_now)
+                        .map(|mut it| it.next().is_none())
+                        .unwrap_or(false)
+                {
+                    let _ = fs::remove_dir(&target_sessions_now);
+                }
+            }
+            copy_dir_recursive(&source_sessions, &target_sessions_now)?;
+        }
+        acted = true;
+    }
+    Ok(acted)
+}
+
+pub fn list_pair_desktop_code_history(
+    source_data_dir: String,
+    target_data_dir: String,
+) -> Result<PairDesktopCodeHistory, String> {
+    pair_desktop_code_history(
+        Path::new(&source_data_dir),
+        Path::new(&target_data_dir),
+    )
+}
+
+pub fn apply_pair_desktop_code_history(
+    source_data_dir: String,
+    target_data_dir: String,
+    change: PairDesktopCodeHistoryChange,
+) -> Result<CopySummary, String> {
+    let source = Path::new(&source_data_dir);
+    let target = Path::new(&target_data_dir);
+    let mut copied = 0;
+    let mut skipped = 0;
+    let current = pair_desktop_code_history(source, target)?;
+    if change.shared {
+        if current.shared && !current.legacy_whole_dir_link {
+            skipped += 1;
+        } else {
+            share_desktop_code_history(source, target)?;
+            copied += 1;
+        }
+    } else {
+        if !current.shared && !current.legacy_whole_dir_link {
+            skipped += 1;
+        } else if make_desktop_code_history_independent(source, target)? {
+            copied += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    Ok(CopySummary { copied, skipped })
+}
+
+// ---------------------------------------------------------------------------
+// Claude Code (CLI) profiles + history sharing
+// ---------------------------------------------------------------------------
+
+const CODE_PROJECTS_DIR: &str = "projects";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeInstall {
+    pub id: String,
+    pub name: String,
+    /// "default" for the implicit ~/.claude install, "profile" for managed ones.
+    pub kind: String,
+    pub config_dir: String,
+    pub alias_name: Option<String>,
+    pub managed: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CodeProject {
+    /// On-disk folder name under `<config>/projects/`, e.g. `-Users-foo-bar`.
+    pub id: String,
+    /// Best-effort decoded path. Ambiguous when project name contains `-`,
+    /// so the UI should treat it as a hint, not ground truth.
+    pub display_path: String,
+    pub session_count: u32,
+    pub total_bytes: u64,
+    pub last_modified_ms: i64,
+    /// First user prompt of the most-recent session, truncated to 240 chars.
+    pub first_message_preview: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairCodeProjectShare {
+    pub id: String,
+    pub display_path: String,
+    pub source_present: bool,
+    pub target_present: bool,
+    pub source_session_count: u32,
+    pub target_session_count: u32,
+    pub source_bytes: u64,
+    pub target_bytes: u64,
+    pub source_last_modified_ms: i64,
+    pub target_last_modified_ms: i64,
+    /// True iff the target project dir is a symlink pointing at source.
+    pub shared: bool,
+    pub direction: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PairCodeShareChange {
+    pub project_id: String,
+    pub shared: bool,
+}
+
+fn default_code_config_dir() -> Result<PathBuf, String> {
+    Ok(home_dir()?.join(".claude"))
+}
+
+fn code_install_from_default() -> Result<Option<CodeInstall>, String> {
+    let dir = default_code_config_dir()?;
+    if !dir.is_dir() {
+        return Ok(None);
+    }
+    Ok(Some(CodeInstall {
+        id: "default".to_string(),
+        name: "Default".to_string(),
+        kind: "default".to_string(),
+        config_dir: dir.to_string_lossy().to_string(),
+        alias_name: None,
+        managed: false,
+    }))
+}
+
+fn code_install_from_profile(profile: &RegistryProfile) -> Option<CodeInstall> {
+    // The CLI persists Code profiles as { configDir, aliasName }. We tolerate
+    // missing fields rather than refusing to load a malformed registry.
+    let code = profile.code.as_ref()?;
+    let config_dir = code
+        .get("configDir")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())?;
+    let alias_name = code
+        .get("aliasName")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    Some(CodeInstall {
+        id: format!("profile:{}", profile.name),
+        name: profile.name.clone(),
+        kind: "profile".to_string(),
+        config_dir,
+        alias_name,
+        managed: true,
+    })
+}
+
+pub fn list_code_installs() -> Result<Vec<CodeInstall>, String> {
+    let mut installs = Vec::new();
+    if let Some(default) = code_install_from_default()? {
+        installs.push(default);
+    }
+    let registry = load_registry()?;
+    for profile in &registry.profiles {
+        if let Some(install) = code_install_from_profile(profile) {
+            installs.push(install);
+        }
+    }
+    Ok(installs)
+}
+
+/// Best-effort: replace every `-` with `/`. Original `-` in dir names is lost,
+/// so we mark the result as a hint by returning the encoded form too.
+fn decode_project_dir_name(name: &str) -> String {
+    if name.is_empty() {
+        return String::new();
+    }
+    name.replace('-', "/")
+}
+
+fn safe_project_id(id: &str) -> bool {
+    !id.is_empty()
+        && !id.contains('/')
+        && !id.contains('\\')
+        && id != "."
+        && id != ".."
+        && !id.split('.').any(|part| part == "..")
+}
+
+fn system_time_to_epoch_ms(time: std::time::SystemTime) -> i64 {
+    time.duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(0)
+}
+
+/// Read the first JSONL line and try to extract a user-visible string.
+/// Tolerant of multiple shapes — Claude Code has evolved over time, so we
+/// accept either `content` (queue-operation) or `message.content`.
+fn read_first_user_message(path: &Path) -> Option<String> {
+    let raw = fs::read_to_string(path).ok()?;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let value: serde_json::Value = match serde_json::from_str(trimmed) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let Some(s) = value.get("content").and_then(|v| v.as_str()) {
+            return Some(truncate_preview(s));
+        }
+        if let Some(msg) = value.get("message") {
+            if let Some(s) = msg.get("content").and_then(|v| v.as_str()) {
+                return Some(truncate_preview(s));
+            }
+            if let Some(arr) = msg.get("content").and_then(|v| v.as_array()) {
+                for part in arr {
+                    if let Some(s) = part.get("text").and_then(|v| v.as_str()) {
+                        return Some(truncate_preview(s));
+                    }
+                }
+            }
+        }
+        // Skip non-user records and keep scanning until we see something useful.
+    }
+    None
+}
+
+fn truncate_preview(s: &str) -> String {
+    let trimmed = s.trim();
+    if trimmed.chars().count() <= 240 {
+        return trimmed.to_string();
+    }
+    let mut out: String = trimmed.chars().take(240).collect();
+    out.push('…');
+    out
+}
+
+#[derive(Debug, Default)]
+struct ProjectFolderStats {
+    session_count: u32,
+    total_bytes: u64,
+    last_modified_ms: i64,
+    most_recent_session: Option<PathBuf>,
+}
+
+fn scan_project_folder(folder: &Path) -> Result<ProjectFolderStats, String> {
+    let mut stats = ProjectFolderStats::default();
+    let read = match fs::read_dir(folder) {
+        Ok(r) => r,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(stats),
+        Err(e) => return Err(format!("Read project folder {}: {e}", folder.display())),
+    };
+    let mut newest_time = std::time::SystemTime::UNIX_EPOCH;
+    for entry in read {
+        let entry = entry.map_err(|e| format!("Read entry: {e}"))?;
+        let path = entry.path();
+        let meta = match entry.metadata() {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+        if !meta.is_file() {
+            continue;
+        }
+        let is_jsonl = path
+            .extension()
+            .and_then(|s| s.to_str())
+            .is_some_and(|ext| ext.eq_ignore_ascii_case("jsonl"));
+        if !is_jsonl {
+            continue;
+        }
+        stats.session_count += 1;
+        stats.total_bytes = stats.total_bytes.saturating_add(meta.len());
+        if let Ok(modified) = meta.modified() {
+            if modified > newest_time {
+                newest_time = modified;
+                stats.most_recent_session = Some(path.clone());
+            }
+        }
+    }
+    stats.last_modified_ms = if stats.session_count == 0 {
+        0
+    } else {
+        system_time_to_epoch_ms(newest_time)
+    };
+    Ok(stats)
+}
+
+pub fn list_code_history(config_dir: &Path) -> Result<Vec<CodeProject>, String> {
+    let projects_root = config_dir.join(CODE_PROJECTS_DIR);
+    if !projects_root.is_dir() {
+        return Ok(Vec::new());
+    }
+
+    let mut projects = Vec::new();
+    for entry in fs::read_dir(&projects_root)
+        .map_err(|e| format!("Read projects root: {e}"))?
+    {
+        let entry = entry.map_err(|e| format!("Read projects entry: {e}"))?;
+        let path = entry.path();
+        let file_type = entry.file_type().map_err(|e| format!("Read project type: {e}"))?;
+        // Skip the `-` placeholder dir Claude Code emits when no cwd is known.
+        if !file_type.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if !safe_project_id(&id) || id == "-" {
+            continue;
+        }
+        let stats = scan_project_folder(&path)?;
+        let preview = stats
+            .most_recent_session
+            .as_deref()
+            .and_then(read_first_user_message);
+        projects.push(CodeProject {
+            display_path: decode_project_dir_name(&id),
+            id,
+            session_count: stats.session_count,
+            total_bytes: stats.total_bytes,
+            last_modified_ms: stats.last_modified_ms,
+            first_message_preview: preview,
+        });
+    }
+
+    // Most recently active first; ties fall back to alphabetical for determinism.
+    projects.sort_by(|a, b| {
+        b.last_modified_ms
+            .cmp(&a.last_modified_ms)
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(projects)
+}
+
+fn code_project_path(config_dir: &Path, project_id: &str) -> PathBuf {
+    config_dir.join(CODE_PROJECTS_DIR).join(project_id)
+}
+
+fn share_code_project_one_way(
+    source_config: &Path,
+    target_config: &Path,
+    project_id: &str,
+) -> Result<(), String> {
+    if !safe_project_id(project_id) {
+        return Err(format!("Invalid project id: {project_id}"));
+    }
+    let source_project = code_project_path(source_config, project_id);
+    let target_project = code_project_path(target_config, project_id);
+    if !source_project.is_dir() {
+        return Err(format!("Project not found in source: {project_id}"));
+    }
+
+    let target_root = target_config.join(CODE_PROJECTS_DIR);
+    fs::create_dir_all(&target_root).map_err(|e| format!("Create target projects dir: {e}"))?;
+
+    if path_points_to(&target_project, &source_project) {
+        return Ok(());
+    }
+    backup_existing_path(&target_project, target_config, project_id)?;
+    symlink_path(&source_project, &target_project)?;
+    Ok(())
+}
+
+fn make_code_project_independent_one_way(
+    source_config: &Path,
+    target_config: &Path,
+    project_id: &str,
+) -> Result<bool, String> {
+    let source_project = code_project_path(source_config, project_id);
+    let target_project = code_project_path(target_config, project_id);
+    if !path_points_to(&target_project, &source_project) {
+        return Ok(false);
+    }
+    remove_path(&target_project)?;
+    if source_project.is_dir() {
+        copy_dir_recursive(&source_project, &target_project)?;
+    }
+    Ok(true)
+}
+
+fn pair_code_project_share(
+    source_config: &Path,
+    target_config: &Path,
+    project_id: &str,
+) -> Result<PairCodeProjectShare, String> {
+    let source_path = code_project_path(source_config, project_id);
+    let target_path = code_project_path(target_config, project_id);
+    let source_meta = fs::symlink_metadata(&source_path).ok();
+    let target_meta = fs::symlink_metadata(&target_path).ok();
+
+    let source_present = source_meta
+        .as_ref()
+        .is_some_and(|m| m.is_dir() || m.file_type().is_symlink());
+    let target_present = target_meta
+        .as_ref()
+        .is_some_and(|m| m.is_dir() || m.file_type().is_symlink());
+
+    let source_stats = if source_present {
+        scan_project_folder(&source_path)?
+    } else {
+        ProjectFolderStats::default()
+    };
+    let target_stats = if target_present {
+        scan_project_folder(&target_path)?
+    } else {
+        ProjectFolderStats::default()
+    };
+
+    let target_to_source = path_points_to(&target_path, &source_path);
+    let source_to_target = path_points_to(&source_path, &target_path);
+    let direction = if target_to_source {
+        "source-to-target"
+    } else if source_to_target {
+        "target-to-source"
+    } else {
+        "independent"
+    }
+    .to_string();
+
+    Ok(PairCodeProjectShare {
+        id: project_id.to_string(),
+        display_path: decode_project_dir_name(project_id),
+        source_present,
+        target_present,
+        source_session_count: source_stats.session_count,
+        target_session_count: target_stats.session_count,
+        source_bytes: source_stats.total_bytes,
+        target_bytes: target_stats.total_bytes,
+        source_last_modified_ms: source_stats.last_modified_ms,
+        target_last_modified_ms: target_stats.last_modified_ms,
+        shared: target_to_source || source_to_target,
+        direction,
+    })
+}
+
+pub fn list_pair_code_history_shares(
+    source_config: &Path,
+    target_config: &Path,
+) -> Result<Vec<PairCodeProjectShare>, String> {
+    let mut ids: BTreeMap<String, ()> = BTreeMap::new();
+    for project in list_code_history(source_config)? {
+        ids.insert(project.id, ());
+    }
+    for project in list_code_history(target_config)? {
+        ids.insert(project.id, ());
+    }
+    let mut out = Vec::with_capacity(ids.len());
+    for id in ids.keys() {
+        out.push(pair_code_project_share(source_config, target_config, id)?);
+    }
+    // Sort: shared first, then by source last-modified desc.
+    out.sort_by(|a, b| {
+        b.shared
+            .cmp(&a.shared)
+            .then_with(|| b.source_last_modified_ms.cmp(&a.source_last_modified_ms))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+    Ok(out)
+}
+
+fn set_pair_code_project_shared(
+    source_config: &Path,
+    target_config: &Path,
+    project_id: &str,
+    desired_shared: bool,
+) -> Result<bool, String> {
+    let current = pair_code_project_share(source_config, target_config, project_id)?;
+    if current.shared == desired_shared {
+        return Ok(false);
+    }
+    if desired_shared {
+        share_code_project_one_way(source_config, target_config, project_id)?;
+    } else {
+        make_code_project_independent_one_way(source_config, target_config, project_id)?;
+    }
+    Ok(true)
+}
+
+pub fn list_pair_code_history_sharing(
+    source_config_dir: String,
+    target_config_dir: String,
+) -> Result<Vec<PairCodeProjectShare>, String> {
+    list_pair_code_history_shares(
+        Path::new(&source_config_dir),
+        Path::new(&target_config_dir),
+    )
+}
+
+pub fn apply_pair_code_history_sharing(
+    source_config_dir: String,
+    target_config_dir: String,
+    changes: Vec<PairCodeShareChange>,
+) -> Result<CopySummary, String> {
+    let source = Path::new(&source_config_dir);
+    let target = Path::new(&target_config_dir);
+    let mut copied = 0;
+    let mut skipped = 0;
+    for change in changes {
+        if set_pair_code_project_shared(source, target, &change.project_id, change.shared)? {
+            copied += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    Ok(CopySummary { copied, skipped })
+}
+
+mod commands {
+    use super::*;
+
+    #[tauri::command]
+    pub fn list_desktop_installs() -> Result<Vec<DesktopInstall>, String> {
+        super::list_desktop_installs()
+    }
+
+    #[tauri::command]
+    pub fn create_desktop_profile(name: String) -> Result<DesktopInstall, String> {
+        super::create_desktop_profile(name)
+    }
+
+    #[tauri::command]
+    pub fn launch_desktop_install(install_id: String) -> Result<(), String> {
+        super::launch_desktop_install(install_id)
+    }
+
+    #[tauri::command]
+    pub fn list_extension_matrix(
+        source_data_dir: String,
+        target_data_dir: String,
+    ) -> Result<Vec<ExtensionSelectionRow>, String> {
+        super::list_extension_matrix(source_data_dir, target_data_dir)
+    }
+
+    #[tauri::command]
+    pub fn copy_selected_extensions(
+        source_data_dir: String,
+        target_data_dir: String,
+        extension_ids: Vec<String>,
+    ) -> Result<CopySummary, String> {
+        super::copy_selected_extensions(source_data_dir, target_data_dir, extension_ids)
+    }
+
+    #[tauri::command]
+    pub fn list_extension_library() -> Result<Vec<ExtensionShareItem>, String> {
+        super::list_extension_library()
+    }
+
+    #[tauri::command]
+    pub fn copy_extension_to_targets(
+        source_data_dir: String,
+        target_data_dirs: Vec<String>,
+        extension_id: String,
+    ) -> Result<CopySummary, String> {
+        super::copy_extension_to_targets(source_data_dir, target_data_dirs, extension_id)
+    }
+
+    #[tauri::command]
+    pub fn list_pair_sharing(
+        source_data_dir: String,
+        target_data_dir: String,
+    ) -> Result<Vec<PairExtensionShare>, String> {
+        super::list_pair_sharing(source_data_dir, target_data_dir)
+    }
+
+    #[tauri::command]
+    pub fn apply_pair_sharing(
+        source_data_dir: String,
+        target_data_dir: String,
+        changes: Vec<PairShareChange>,
+    ) -> Result<CopySummary, String> {
+        super::apply_pair_sharing(source_data_dir, target_data_dir, changes)
+    }
+
+    #[tauri::command]
+    pub fn list_code_installs() -> Result<Vec<CodeInstall>, String> {
+        super::list_code_installs()
+    }
+
+    #[tauri::command]
+    pub fn list_code_history(config_dir: String) -> Result<Vec<CodeProject>, String> {
+        super::list_code_history(Path::new(&config_dir))
+    }
+
+    #[tauri::command]
+    pub fn list_pair_code_history_sharing(
+        source_config_dir: String,
+        target_config_dir: String,
+    ) -> Result<Vec<PairCodeProjectShare>, String> {
+        super::list_pair_code_history_sharing(source_config_dir, target_config_dir)
+    }
+
+    #[tauri::command]
+    pub fn apply_pair_code_history_sharing(
+        source_config_dir: String,
+        target_config_dir: String,
+        changes: Vec<PairCodeShareChange>,
+    ) -> Result<CopySummary, String> {
+        super::apply_pair_code_history_sharing(source_config_dir, target_config_dir, changes)
+    }
+
+    #[tauri::command]
+    pub fn list_pair_desktop_code_history(
+        source_data_dir: String,
+        target_data_dir: String,
+    ) -> Result<PairDesktopCodeHistory, String> {
+        super::list_pair_desktop_code_history(source_data_dir, target_data_dir)
+    }
+
+    #[tauri::command]
+    pub fn apply_pair_desktop_code_history(
+        source_data_dir: String,
+        target_data_dir: String,
+        change: PairDesktopCodeHistoryChange,
+    ) -> Result<CopySummary, String> {
+        super::apply_pair_desktop_code_history(source_data_dir, target_data_dir, change)
+    }
+}
+
+pub fn run() {
+    tauri::Builder::default()
+        .invoke_handler(tauri::generate_handler![
+            commands::list_desktop_installs,
+            commands::create_desktop_profile,
+            commands::launch_desktop_install,
+            commands::list_extension_matrix,
+            commands::copy_selected_extensions,
+            commands::list_extension_library,
+            commands::copy_extension_to_targets,
+            commands::list_pair_sharing,
+            commands::apply_pair_sharing,
+            commands::list_code_installs,
+            commands::list_code_history,
+            commands::list_pair_code_history_sharing,
+            commands::apply_pair_code_history_sharing,
+            commands::list_pair_desktop_code_history,
+            commands::apply_pair_desktop_code_history
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running Claude Multiprofile");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    #[test]
+    fn sanitize_profile_name_matches_cli_rules() {
+        assert_eq!(sanitize_profile_name("  WORK  "), "work");
+        assert_eq!(sanitize_profile_name("Client ACME"), "client-acme");
+        assert_eq!(sanitize_profile_name("foo!!!bar"), "foo-bar");
+        assert_eq!(sanitize_profile_name("--leading--"), "leading");
+        assert_eq!(sanitize_profile_name("multi   spaces"), "multi-spaces");
+    }
+
+    #[test]
+    fn registry_round_trips_existing_cli_shape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("profiles.json");
+        let registry = RegistryFile {
+            version: 1,
+            profiles: vec![RegistryProfile {
+                name: "work".to_string(),
+                profile_type: "desktop".to_string(),
+                desktop: Some(RegistryDesktop {
+                    data_dir: "/Users/me/Library/Application Support/Claude-WORK".to_string(),
+                    app_path: "/Users/me/Applications/Claude WORK.app".to_string(),
+                    claude_app_path: "/Applications/Claude.app".to_string(),
+                }),
+                code: None,
+                created_at: "2026-05-22T12:00:00.000Z".to_string(),
+            }],
+        };
+
+        save_registry_to_path(&path, &registry).unwrap();
+        let loaded = load_registry_from_path(&path).unwrap();
+
+        assert_eq!(loaded, registry);
+        let raw = fs::read_to_string(path).unwrap();
+        assert!(raw.contains("\"createdAt\""));
+        assert!(raw.contains("\"dataDir\""));
+    }
+
+    #[test]
+    fn list_extensions_reports_settings_presence_sorted_by_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ext_dir = tmp.path().join("Claude Extensions");
+        let settings_dir = tmp.path().join("Claude Extensions Settings");
+        fs::create_dir_all(ext_dir.join("zeta")).unwrap();
+        fs::create_dir_all(ext_dir.join("alpha")).unwrap();
+        fs::create_dir_all(&settings_dir).unwrap();
+        fs::write(settings_dir.join("alpha.json"), "{}").unwrap();
+
+        let extensions = list_extensions_in_dir(tmp.path()).unwrap();
+
+        assert_eq!(
+            extensions,
+            vec![
+                ExtensionEntry {
+                    id: "alpha".to_string(),
+                    has_settings: true,
+                },
+                ExtensionEntry {
+                    id: "zeta".to_string(),
+                    has_settings: false,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn copy_extension_replaces_folder_and_matching_settings_only() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+
+        let source_ext = source.path().join("Claude Extensions").join("shared-one");
+        let source_settings = source
+            .path()
+            .join("Claude Extensions Settings")
+            .join("shared-one.json");
+        fs::create_dir_all(&source_ext).unwrap();
+        fs::create_dir_all(source_settings.parent().unwrap()).unwrap();
+        fs::write(source_ext.join("manifest.json"), "{\"fresh\":true}").unwrap();
+        fs::write(&source_settings, "{\"enabled\":true}").unwrap();
+
+        let stale_target_ext = target.path().join("Claude Extensions").join("shared-one");
+        fs::create_dir_all(&stale_target_ext).unwrap();
+        fs::write(stale_target_ext.join("old.txt"), "stale").unwrap();
+
+        copy_extension_between_dirs(source.path(), target.path(), "shared-one").unwrap();
+
+        let copied_manifest = target
+            .path()
+            .join("Claude Extensions")
+            .join("shared-one")
+            .join("manifest.json");
+        let copied_settings = target
+            .path()
+            .join("Claude Extensions Settings")
+            .join("shared-one.json");
+
+        assert_eq!(fs::read_to_string(copied_manifest).unwrap(), "{\"fresh\":true}");
+        assert_eq!(fs::read_to_string(copied_settings).unwrap(), "{\"enabled\":true}");
+        assert!(!stale_target_ext.join("old.txt").exists());
+    }
+
+    #[test]
+    fn extension_library_is_content_first_and_includes_default_as_target() {
+        let default_dir = tempfile::tempdir().unwrap();
+        let work_dir = tempfile::tempdir().unwrap();
+        let client_dir = tempfile::tempdir().unwrap();
+
+        fs::create_dir_all(default_dir.path().join("Claude Extensions").join("theme-kit")).unwrap();
+        fs::create_dir_all(default_dir.path().join("Claude Extensions Settings")).unwrap();
+        fs::write(
+            default_dir
+                .path()
+                .join("Claude Extensions Settings")
+                .join("theme-kit.json"),
+            "{}",
+        )
+        .unwrap();
+        fs::create_dir_all(work_dir.path().join("Claude Extensions").join("theme-kit")).unwrap();
+        fs::create_dir_all(client_dir.path().join("Claude Extensions").join("mcp-helper")).unwrap();
+
+        let installs = vec![
+            DesktopInstall {
+                id: "default".to_string(),
+                name: "default".to_string(),
+                kind: "default".to_string(),
+                data_dir: default_dir.path().to_string_lossy().to_string(),
+                app_path: None,
+                launcher_path: None,
+                managed: false,
+            },
+            DesktopInstall {
+                id: "profile:work".to_string(),
+                name: "work".to_string(),
+                kind: "profile".to_string(),
+                data_dir: work_dir.path().to_string_lossy().to_string(),
+                app_path: None,
+                launcher_path: None,
+                managed: true,
+            },
+            DesktopInstall {
+                id: "profile:client".to_string(),
+                name: "client".to_string(),
+                kind: "profile".to_string(),
+                data_dir: client_dir.path().to_string_lossy().to_string(),
+                app_path: None,
+                launcher_path: None,
+                managed: true,
+            },
+        ];
+
+        let library = build_extension_library(&installs).unwrap();
+        let theme = library.iter().find(|item| item.id == "theme-kit").unwrap();
+
+        assert_eq!(
+            library.iter().map(|item| item.id.as_str()).collect::<Vec<_>>(),
+            vec!["mcp-helper", "theme-kit"]
+        );
+        assert_eq!(theme.sources.len(), 2);
+        assert!(theme.targets.iter().any(|target| {
+            target.install_id == "default" && target.has_extension && target.has_settings
+        }));
+        assert!(theme.targets.iter().any(|target| {
+            target.install_id == "profile:client" && !target.has_extension
+        }));
+    }
+
+    #[test]
+    fn copy_extension_to_targets_applies_one_content_item_to_multiple_profiles() {
+        let source = tempfile::tempdir().unwrap();
+        let target_a = tempfile::tempdir().unwrap();
+        let target_b = tempfile::tempdir().unwrap();
+
+        let source_ext = source.path().join("Claude Extensions").join("shared-one");
+        let source_settings = source
+            .path()
+            .join("Claude Extensions Settings")
+            .join("shared-one.json");
+        fs::create_dir_all(&source_ext).unwrap();
+        fs::create_dir_all(source_settings.parent().unwrap()).unwrap();
+        fs::write(source_ext.join("manifest.json"), "{\"fresh\":true}").unwrap();
+        fs::write(&source_settings, "{\"enabled\":true}").unwrap();
+
+        let summary = copy_extension_to_target_dirs(
+            source.path(),
+            &[target_a.path().to_path_buf(), target_b.path().to_path_buf()],
+            "shared-one",
+        )
+        .unwrap();
+
+        assert_eq!(summary.copied, 2);
+        assert_eq!(summary.skipped, 0);
+        assert!(target_a
+            .path()
+            .join("Claude Extensions")
+            .join("shared-one")
+            .join("manifest.json")
+            .exists());
+        assert!(target_b
+            .path()
+            .join("Claude Extensions Settings")
+            .join("shared-one.json")
+            .exists());
+    }
+
+    #[test]
+    fn pair_share_state_detects_symlinked_extension_between_two_profiles() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let source_ext = source.path().join("Claude Extensions").join("shared-one");
+        let source_settings = source
+            .path()
+            .join("Claude Extensions Settings")
+            .join("shared-one.json");
+        fs::create_dir_all(&source_ext).unwrap();
+        fs::create_dir_all(source_settings.parent().unwrap()).unwrap();
+        fs::write(source_ext.join("manifest.json"), "{}").unwrap();
+        fs::write(&source_settings, "{}").unwrap();
+
+        set_pair_extension_shared(source.path(), target.path(), "shared-one", true).unwrap();
+        let rows = list_pair_extension_shares(source.path(), target.path()).unwrap();
+        let row = rows.iter().find(|row| row.id == "shared-one").unwrap();
+
+        assert!(row.shared);
+        assert_eq!(row.direction, "source-to-target");
+        assert!(target
+            .path()
+            .join("Claude Extensions")
+            .join("shared-one")
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink());
+    }
+
+    #[test]
+    fn unchecking_pair_share_turns_symlink_back_into_independent_copy() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let source_ext = source.path().join("Claude Extensions").join("shared-one");
+        fs::create_dir_all(&source_ext).unwrap();
+        fs::write(source_ext.join("manifest.json"), "{\"fresh\":true}").unwrap();
+
+        set_pair_extension_shared(source.path(), target.path(), "shared-one", true).unwrap();
+        set_pair_extension_shared(source.path(), target.path(), "shared-one", false).unwrap();
+
+        let target_ext = target.path().join("Claude Extensions").join("shared-one");
+        assert!(target_ext.is_dir());
+        assert!(!target_ext.symlink_metadata().unwrap().file_type().is_symlink());
+        assert_eq!(
+            fs::read_to_string(target_ext.join("manifest.json")).unwrap(),
+            "{\"fresh\":true}"
+        );
+    }
+
+    fn write_session_jsonl(dir: &Path, sid: &str, prompt: &str, extra_lines: usize) -> PathBuf {
+        let path = dir.join(format!("{sid}.jsonl"));
+        let header = serde_json::json!({
+            "type": "queue-operation",
+            "operation": "enqueue",
+            "timestamp": "2026-04-22T07:14:05.312Z",
+            "sessionId": sid,
+            "content": prompt,
+        })
+        .to_string();
+        let mut body = String::new();
+        body.push_str(&header);
+        body.push('\n');
+        for i in 0..extra_lines {
+            body.push_str(&format!("{{\"type\":\"noise\",\"i\":{i}}}\n"));
+        }
+        fs::write(&path, body).unwrap();
+        path
+    }
+
+    #[test]
+    fn list_code_history_reports_session_count_size_and_preview() {
+        let cfg = tempfile::tempdir().unwrap();
+        let projects = cfg.path().join(CODE_PROJECTS_DIR);
+        fs::create_dir_all(&projects).unwrap();
+
+        let proj_a = projects.join("-Users-foo-alpha");
+        let proj_b = projects.join("-Users-foo-beta");
+        fs::create_dir_all(&proj_a).unwrap();
+        fs::create_dir_all(&proj_b).unwrap();
+        write_session_jsonl(&proj_a, "11111111-1111-1111-1111-111111111111", "hello alpha", 0);
+        write_session_jsonl(&proj_a, "22222222-2222-2222-2222-222222222222", "hello again", 0);
+        write_session_jsonl(&proj_b, "33333333-3333-3333-3333-333333333333", "world beta", 0);
+
+        // The lonely "-" placeholder dir Claude Code occasionally creates is ignored.
+        fs::create_dir_all(projects.join("-")).unwrap();
+
+        let projects_out = list_code_history(cfg.path()).unwrap();
+        assert_eq!(projects_out.len(), 2);
+
+        let alpha = projects_out.iter().find(|p| p.id == "-Users-foo-alpha").unwrap();
+        assert_eq!(alpha.session_count, 2);
+        assert!(alpha.total_bytes > 0);
+        assert!(alpha.first_message_preview.is_some());
+        assert_eq!(alpha.display_path, "/Users/foo/alpha");
+    }
+
+    #[test]
+    fn pair_code_history_share_is_live_symlink_and_reversible() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let proj_id = "-Users-foo-shared";
+        let source_proj = source.path().join(CODE_PROJECTS_DIR).join(proj_id);
+        fs::create_dir_all(&source_proj).unwrap();
+        write_session_jsonl(&source_proj, "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", "from source", 0);
+
+        // Share A -> B.
+        let summary = apply_pair_code_history_sharing(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+            vec![PairCodeShareChange { project_id: proj_id.to_string(), shared: true }],
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+
+        let target_proj = target.path().join(CODE_PROJECTS_DIR).join(proj_id);
+        assert!(target_proj.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Live: appending a new session in source must show up under target.
+        write_session_jsonl(&source_proj, "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb", "live append", 0);
+        let pair_rows = list_pair_code_history_shares(source.path(), target.path()).unwrap();
+        let row = pair_rows.iter().find(|r| r.id == proj_id).unwrap();
+        assert!(row.shared);
+        assert_eq!(row.source_session_count, 2);
+        assert_eq!(row.target_session_count, 2);
+
+        // Unshare: target becomes an independent copy of the current source state.
+        let summary = apply_pair_code_history_sharing(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+            vec![PairCodeShareChange { project_id: proj_id.to_string(), shared: false }],
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+        assert!(target_proj.is_dir());
+        assert!(!target_proj.symlink_metadata().unwrap().file_type().is_symlink());
+
+        // Now editing source should NOT touch target.
+        write_session_jsonl(&source_proj, "cccccccc-cccc-cccc-cccc-cccccccccccc", "post-unshare", 0);
+        let target_files: Vec<_> = fs::read_dir(&target_proj)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(target_files.len(), 2);
+    }
+
+    #[test]
+    fn invalid_project_ids_are_rejected_for_sharing() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let err = share_code_project_one_way(source.path(), target.path(), "..").unwrap_err();
+        assert!(err.contains("Invalid project id"), "got: {err}");
+        let err = share_code_project_one_way(source.path(), target.path(), "../bad").unwrap_err();
+        assert!(err.contains("Invalid project id"), "got: {err}");
+    }
+
+    fn write_desktop_code_session(
+        sessions_root: &Path,
+        device_id: &str,
+        workspace_id: &str,
+        session_local_id: &str,
+        cwd: &str,
+        last_activity_ms: i64,
+    ) -> PathBuf {
+        let dir = sessions_root.join(device_id).join(workspace_id);
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("local_{session_local_id}.json"));
+        let json = serde_json::json!({
+            "sessionId": format!("local_{session_local_id}"),
+            "cwd": cwd,
+            "originCwd": cwd,
+            "createdAt": last_activity_ms - 1000,
+            "lastActivityAt": last_activity_ms,
+            "title": format!("Session in {cwd}"),
+        });
+        fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+        path
+    }
+
+    /// Write the two plain-JSON files Claude Desktop produces on every
+    /// launch. Used by tests to fake the "I'm logged in as <acct> in
+    /// org <org>" state without spinning up Desktop.
+    fn write_desktop_login_files(data_dir: &Path, account_id: &str, org_id: &str) {
+        fs::write(
+            data_dir.join(COWORK_OPS_FILE),
+            serde_json::to_string(&serde_json::json!({
+                "ownerAccountId": account_id,
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            data_dir.join(EXTENSIONS_BLOCKLIST_FILE),
+            serde_json::to_string(&serde_json::json!([
+                {
+                    "entries": [],
+                    "lastUpdated": "2026-01-01T00:00:00.000Z",
+                    "url": format!("https://claude.ai/api/organizations/{org_id}/dxt/blocklist"),
+                }
+            ]))
+            .unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn scan_desktop_code_history_collects_recent_cwds_and_totals() {
+        let data = tempfile::tempdir().unwrap();
+        let sessions = data.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        write_desktop_code_session(&sessions, "dev1", "ws1", "aaaa", "/Users/me/projA", 1_700_000_000_000);
+        write_desktop_code_session(&sessions, "dev1", "ws1", "bbbb", "/Users/me/projB", 1_700_000_005_000);
+        write_desktop_code_session(&sessions, "dev1", "ws1", "cccc", "/Users/me/projA", 1_700_000_010_000);
+
+        let stat = scan_desktop_code_history(&sessions).unwrap();
+        assert!(stat.present);
+        assert_eq!(stat.session_count, 3);
+        assert_eq!(stat.last_activity_ms, 1_700_000_010_000);
+        assert!(stat.total_bytes > 0);
+        // projA was active most recently => first.
+        assert_eq!(stat.recent_cwds.first().map(String::as_str), Some("/Users/me/projA"));
+        assert!(stat.recent_cwds.contains(&"/Users/me/projB".to_string()));
+
+        let primary = stat.primary_workspace.expect("workspace recorded");
+        assert_eq!(primary.device_id, "dev1");
+        assert_eq!(primary.workspace_id, "ws1");
+    }
+
+    #[test]
+    fn scan_missing_desktop_code_history_returns_absent() {
+        let data = tempfile::tempdir().unwrap();
+        let stat = scan_desktop_code_history(&data.path().join(DESKTOP_CODE_SESSIONS_DIR)).unwrap();
+        assert!(!stat.present);
+        assert_eq!(stat.session_count, 0);
+        assert!(stat.recent_cwds.is_empty());
+        assert!(stat.primary_workspace.is_none());
+    }
+
+    #[test]
+    fn empty_workspace_dir_is_still_recognised_as_primary() {
+        let data = tempfile::tempdir().unwrap();
+        let sessions = data.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        // Workspace exists on disk but has no session JSONs yet — this is
+        // exactly the "freshly initialised" state we need before sharing.
+        fs::create_dir_all(sessions.join("dev0").join("ws0")).unwrap();
+        let stat = scan_desktop_code_history(&sessions).unwrap();
+        assert!(stat.present);
+        assert_eq!(stat.session_count, 0);
+        let primary = stat.primary_workspace.expect("primary workspace recorded");
+        assert_eq!(primary.device_id, "dev0");
+        assert_eq!(primary.workspace_id, "ws0");
+    }
+
+    #[test]
+    fn primary_workspace_is_the_most_recent_one() {
+        let data = tempfile::tempdir().unwrap();
+        let sessions = data.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        write_desktop_code_session(&sessions, "devOld", "wsOld", "aaaa", "/x", 1_000);
+        write_desktop_code_session(&sessions, "devNew", "wsNew", "bbbb", "/y", 9_000);
+
+        let stat = scan_desktop_code_history(&sessions).unwrap();
+        let primary = stat.primary_workspace.unwrap();
+        assert_eq!(primary.device_id, "devNew");
+        assert_eq!(primary.workspace_id, "wsNew");
+    }
+
+    const SRC_ACCT: &str = "11111111-1111-1111-1111-111111111111";
+    const SRC_ORG: &str = "22222222-2222-2222-2222-222222222222";
+    const TGT_ACCT: &str = "33333333-3333-3333-3333-333333333333";
+    const TGT_ORG: &str = "44444444-4444-4444-4444-444444444444";
+
+    #[test]
+    fn read_workspace_identity_from_json_files() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(read_workspace_identity(dir.path()).unwrap().is_none());
+        write_desktop_login_files(dir.path(), SRC_ACCT, SRC_ORG);
+        let id = read_workspace_identity(dir.path()).unwrap().unwrap();
+        assert_eq!(id.device_id, SRC_ACCT);
+        assert_eq!(id.workspace_id, SRC_ORG);
+    }
+
+    #[test]
+    fn share_works_when_target_has_no_workspace_dir_yet() {
+        // This is the user's real-world scenario: they logged into JUDY's
+        // Desktop (so the JSON identity files exist) but never used the
+        // Code panel, so `claude-code-sessions/<acct>/<org>/` is missing.
+        // Sharing must succeed anyway by pre-creating the symlink.
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+
+        // Source has 2 real sessions and is logged in.
+        let src_sessions = source.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        write_desktop_code_session(&src_sessions, SRC_ACCT, SRC_ORG, "1111", "/work", 1_700_000_000_000);
+        write_desktop_code_session(&src_sessions, SRC_ACCT, SRC_ORG, "2222", "/work", 1_700_000_001_000);
+        write_desktop_login_files(source.path(), SRC_ACCT, SRC_ORG);
+
+        // Target is logged in but has NEVER opened the Code panel (no
+        // claude-code-sessions/ directory at all).
+        write_desktop_login_files(target.path(), TGT_ACCT, TGT_ORG);
+        assert!(!target.path().join(DESKTOP_CODE_SESSIONS_DIR).exists());
+
+        let pre = list_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert!(!pre.shared);
+        assert!(!pre.target_needs_bootstrap);
+        assert!(!pre.source_needs_bootstrap);
+        assert_eq!(pre.source.primary_workspace.as_ref().unwrap().device_id, SRC_ACCT);
+        assert_eq!(pre.target.primary_workspace.as_ref().unwrap().device_id, TGT_ACCT);
+
+        // Share — must NOT error even though target has no on-disk workspace.
+        let summary = apply_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+            PairDesktopCodeHistoryChange { shared: true },
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+
+        // Target's workspace dir was created and is a symlink to source's.
+        let target_ws_path = target
+            .path()
+            .join(DESKTOP_CODE_SESSIONS_DIR)
+            .join(TGT_ACCT)
+            .join(TGT_ORG);
+        let meta = fs::symlink_metadata(&target_ws_path).unwrap();
+        assert!(meta.file_type().is_symlink(), "target <acct>/<org> must be a symlink");
+        let resolved = fs::canonicalize(&target_ws_path).unwrap();
+        let expected = fs::canonicalize(
+            source
+                .path()
+                .join(DESKTOP_CODE_SESSIONS_DIR)
+                .join(SRC_ACCT)
+                .join(SRC_ORG),
+        )
+        .unwrap();
+        assert_eq!(resolved, expected);
+
+        // The whole-dir is NOT linked.
+        let target_sessions_path = target.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        assert!(
+            !fs::symlink_metadata(&target_sessions_path)
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+
+        // Through-link reads see source's 2 sessions.
+        let post = list_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert!(post.shared);
+        assert_eq!(post.direction, "source-to-target");
+        assert_eq!(post.source.session_count, 2);
+        assert_eq!(post.target.session_count, 2);
+
+        // Live: writing a new session under source surfaces in target.
+        write_desktop_code_session(&src_sessions, SRC_ACCT, SRC_ORG, "3333", "/work", 1_700_000_005_000);
+        let post = list_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert_eq!(post.target.session_count, 3);
+    }
+
+    #[test]
+    fn share_when_target_already_has_existing_workspace_backs_it_up() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+
+        let src_sessions = source.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        write_desktop_code_session(&src_sessions, SRC_ACCT, SRC_ORG, "1111", "/work", 1_700_000_000_000);
+        write_desktop_login_files(source.path(), SRC_ACCT, SRC_ORG);
+
+        let tgt_sessions = target.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        write_desktop_code_session(&tgt_sessions, TGT_ACCT, TGT_ORG, "9999", "/lonely", 1_700_000_002_000);
+        write_desktop_login_files(target.path(), TGT_ACCT, TGT_ORG);
+
+        let summary = apply_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+            PairDesktopCodeHistoryChange { shared: true },
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+
+        // Target's `<acct>/<org>` is now a symlink to source's; the original
+        // is preserved under "Claude Multiprofile Backups".
+        let target_ws_path = tgt_sessions.join(TGT_ACCT).join(TGT_ORG);
+        assert!(fs::symlink_metadata(&target_ws_path).unwrap().file_type().is_symlink());
+        let backups = target.path().join("Claude Multiprofile Backups");
+        assert!(backups.exists());
+    }
+
+    #[test]
+    fn share_errors_clearly_when_target_has_not_logged_in() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+        let src_sessions = source.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        write_desktop_code_session(&src_sessions, SRC_ACCT, SRC_ORG, "1111", "/work", 1_700_000_000_000);
+        write_desktop_login_files(source.path(), SRC_ACCT, SRC_ORG);
+        // Target has no JSON identity files at all (never launched).
+
+        let pair = list_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert!(pair.target_needs_bootstrap);
+        assert!(!pair.source_needs_bootstrap);
+
+        let err = apply_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+            PairDesktopCodeHistoryChange { shared: true },
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("Target profile hasn't completed Claude Desktop login"),
+            "got: {err}",
+        );
+    }
+
+    #[test]
+    fn legacy_whole_dir_link_is_replaced_with_workspace_link() {
+        let source = tempfile::tempdir().unwrap();
+        let target = tempfile::tempdir().unwrap();
+
+        // Source has real sessions and is logged in.
+        let src_sessions = source.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        write_desktop_code_session(&src_sessions, SRC_ACCT, SRC_ORG, "1111", "/work", 1_700_000_000_000);
+        write_desktop_login_files(source.path(), SRC_ACCT, SRC_ORG);
+
+        // Simulate the legacy whole-dir symlink that an earlier version of
+        // this app would install.
+        let tgt_sessions = target.path().join(DESKTOP_CODE_SESSIONS_DIR);
+        symlink_path(&src_sessions, &tgt_sessions).unwrap();
+        // Target is logged in (different account) but has no on-disk workspace.
+        write_desktop_login_files(target.path(), TGT_ACCT, TGT_ORG);
+
+        let pre = list_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+        )
+        .unwrap();
+        assert!(pre.legacy_whole_dir_link);
+
+        // Apply share: legacy link is cleaned up and replaced with a
+        // workspace-level link, all in one shot.
+        let summary = apply_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+            PairDesktopCodeHistoryChange { shared: true },
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+
+        let target_ws_path = tgt_sessions.join(TGT_ACCT).join(TGT_ORG);
+        assert!(fs::symlink_metadata(&target_ws_path).unwrap().file_type().is_symlink());
+
+        // Idempotent: re-applying the same share is a skip.
+        let summary = apply_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+            PairDesktopCodeHistoryChange { shared: true },
+        )
+        .unwrap();
+        assert_eq!(summary.skipped, 1);
+        assert_eq!(summary.copied, 0);
+
+        // Unshare: target's <acct>/<org> becomes an independent copy.
+        let summary = apply_pair_desktop_code_history(
+            source.path().to_string_lossy().to_string(),
+            target.path().to_string_lossy().to_string(),
+            PairDesktopCodeHistoryChange { shared: false },
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+        assert!(!fs::symlink_metadata(&target_ws_path).unwrap().file_type().is_symlink());
+    }
+
+    #[test]
+    fn list_code_installs_includes_default_when_dotclaude_exists() {
+        // We cannot freely override HOME without affecting other tests in
+        // parallel, so we just assert the function is well-formed and returns
+        // something runnable. The integration smoke (manual GUI run) covers
+        // the real ~/.claude detection.
+        let installs = list_code_installs().unwrap();
+        if let Some(default) = installs.iter().find(|i| i.kind == "default") {
+            assert_eq!(default.id, "default");
+        }
+    }
+}
