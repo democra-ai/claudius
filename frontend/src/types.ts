@@ -285,6 +285,18 @@ export type ProfileStats = {
    *  Source: buddy-tokens.json. Resets daily by Claude Desktop. */
   tokens_today: number;
   tokens_today_date: string | null;
+  /** Time-windowed code session counts — the codexbar-style "do I have
+   *  headroom right now?" reading. */
+  code_sessions_last_5h: number;
+  code_sessions_last_24h: number;
+  code_sessions_last_7d: number;
+  code_sessions_last_30d: number;
+  /** Avg sessions/day over prior 7 days (excluding today) — the pace
+   *  baseline today is compared against. */
+  code_sessions_per_day_baseline: number;
+  code_sessions_today: number;
+  /** Most-used model in the last 7 days, normalized (e.g. "opus-4-7"). */
+  top_model_last_7d: string | null;
   /** Device id from ant-did, base64-decoded. Useful to spot machine drift. */
   device_id: string | null;
   ssh_remote_count: number;
