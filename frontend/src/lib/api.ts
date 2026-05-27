@@ -39,6 +39,10 @@ export const api = {
     return invoke("create_desktop_profile", { name });
   },
 
+  createCodeProfile(name: string, seedFromDefault: boolean): Promise<CodeInstall> {
+    return invoke("create_code_profile", { name, seedFromDefault });
+  },
+
   launchDesktopInstall(installId: string): Promise<void> {
     return invoke("launch_desktop_install", { installId });
   },

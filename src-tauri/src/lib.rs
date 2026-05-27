@@ -1682,6 +1682,170 @@ fn code_install_from_profile(profile: &RegistryProfile) -> Option<CodeInstall> {
     })
 }
 
+/// Subdirectories under `~/.claude` we never seed because they carry
+/// chat history (= account data) or per-shell ephemera.
+const CODE_SEED_EXCLUDE: &[&str] = &["projects", "shell-snapshots", "todos", "statsig"];
+
+/// Marker comments framing the managed-alias block we append to the user's
+/// shell rc file. Re-running `create_code_profile` for an existing name
+/// rewrites the contents of this block in place.
+const ALIAS_MARK_BEGIN: &str = "# >>> claude-multiprofile managed (do not edit)";
+const ALIAS_MARK_END: &str = "# <<< claude-multiprofile managed";
+
+fn copy_seed_dir(source: &Path, target: &Path) -> Result<(), String> {
+    fs::create_dir_all(target).map_err(|e| format!("Create {}: {e}", target.display()))?;
+    for entry in fs::read_dir(source).map_err(|e| format!("Read {}: {e}", source.display()))? {
+        let entry = entry.map_err(|e| format!("Read seed entry: {e}"))?;
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if CODE_SEED_EXCLUDE.iter().any(|n| name_str.as_ref() == *n) {
+            continue;
+        }
+        if name_str.contains("credential") || name_str.starts_with(".credentials") {
+            continue;
+        }
+        let src_path = entry.path();
+        let dst_path = target.join(&name);
+        let ty = entry
+            .file_type()
+            .map_err(|e| format!("Read file type: {e}"))?;
+        if ty.is_dir() {
+            copy_dir_recursive(&src_path, &dst_path)?;
+        } else if ty.is_file() {
+            fs::copy(&src_path, &dst_path)
+                .map_err(|e| format!("Copy {}: {e}", src_path.display()))?;
+        }
+    }
+    Ok(())
+}
+
+/// Append (or replace) a "managed" alias block in the user's zshrc.
+/// Returns the rc-file path written. Only handles zsh — bash/fish can
+/// be layered on later if anyone asks.
+fn write_zsh_alias_block(alias_name: &str, config_dir: &Path) -> Result<PathBuf, String> {
+    let home = home_dir()?;
+    let rc = home.join(".zshrc");
+    let existing = fs::read_to_string(&rc).unwrap_or_default();
+
+    let alias_line = format!(
+        "alias {alias_name}='CLAUDE_CONFIG_DIR={} claude'",
+        shell_quote_single(config_dir)
+    );
+    let block = format!(
+        "{ALIAS_MARK_BEGIN}\n{}\n{ALIAS_MARK_END}\n",
+        alias_line
+    );
+
+    let new_contents = if let (Some(start), Some(end)) =
+        (existing.find(ALIAS_MARK_BEGIN), existing.find(ALIAS_MARK_END))
+    {
+        let end_line_end = existing[end..]
+            .find('\n')
+            .map(|p| end + p + 1)
+            .unwrap_or(existing.len());
+        let mut out = String::with_capacity(existing.len() + block.len());
+        out.push_str(&existing[..start]);
+        out.push_str(&block);
+        out.push_str(&existing[end_line_end..]);
+        out
+    } else {
+        let mut out = existing.clone();
+        if !out.is_empty() && !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&block);
+        out
+    };
+
+    fs::write(&rc, new_contents).map_err(|e| format!("Write {}: {e}", rc.display()))?;
+    Ok(rc)
+}
+
+pub fn create_code_profile(
+    name: String,
+    seed_from_default: bool,
+) -> Result<CodeInstall, String> {
+    let clean = sanitize_profile_name(&name);
+    if clean.is_empty() {
+        return Err("Profile name cannot be empty".to_string());
+    }
+    if clean == "claude" {
+        return Err("Alias would shadow the bare `claude` command".to_string());
+    }
+
+    let home = home_dir()?;
+    let config_dir = home.join(format!(".claude-{clean}"));
+    let default_dir = default_code_config_dir()?;
+    if config_dir == default_dir {
+        return Err("Refusing to use the default ~/.claude directory".to_string());
+    }
+
+    let alias_name = format!("claude-{clean}");
+
+    let mut registry = load_registry()?;
+    // If a profile with this name already exists, UPDATE it (e.g. add Code
+    // to an existing Desktop entry). Reject if it already has Code.
+    let existing_idx = registry.profiles.iter().position(|p| p.name == clean);
+    if let Some(i) = existing_idx {
+        if registry.profiles[i].code.is_some() {
+            return Err(format!(
+                "Code profile \"{clean}\" already exists — pick a different name"
+            ));
+        }
+    }
+
+    if config_dir.exists() {
+        return Err(format!(
+            "Config dir {} already exists — pick a different name",
+            config_dir.display()
+        ));
+    }
+    fs::create_dir_all(&config_dir)
+        .map_err(|e| format!("Create {}: {e}", config_dir.display()))?;
+
+    if seed_from_default && default_dir.exists() {
+        copy_seed_dir(&default_dir, &config_dir)?;
+    }
+
+    let rc_path = write_zsh_alias_block(&alias_name, &config_dir)?;
+
+    let code_json = serde_json::json!({
+        "configDir": config_dir.to_string_lossy(),
+        "aliasName": alias_name,
+        "shell": "zsh",
+        "rcPath": rc_path.to_string_lossy(),
+    });
+
+    match existing_idx {
+        Some(i) => {
+            registry.profiles[i].code = Some(code_json);
+            registry.profiles[i].profile_type = "both".to_string();
+        }
+        None => {
+            registry.profiles.push(RegistryProfile {
+                name: clean.clone(),
+                profile_type: "code".to_string(),
+                desktop: None,
+                code: Some(code_json),
+                created_at: Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true),
+            });
+        }
+    }
+    save_registry(&registry)?;
+
+    Ok(CodeInstall {
+        id: format!("profile:{clean}"),
+        name: clean,
+        kind: "profile".to_string(),
+        config_dir: config_dir.to_string_lossy().to_string(),
+        alias_name: Some(alias_name),
+        managed: true,
+    })
+}
+
 pub fn list_code_installs() -> Result<Vec<CodeInstall>, String> {
     let mut installs = Vec::new();
     if let Some(default) = code_install_from_default()? {
@@ -4307,6 +4471,14 @@ mod commands {
     }
 
     #[tauri::command]
+    pub fn create_code_profile(
+        name: String,
+        seed_from_default: bool,
+    ) -> Result<CodeInstall, String> {
+        super::create_code_profile(name, seed_from_default)
+    }
+
+    #[tauri::command]
     pub fn launch_desktop_install(install_id: String) -> Result<(), String> {
         super::launch_desktop_install(install_id)
     }
@@ -4520,6 +4692,7 @@ pub fn run() {
             commands::copy_extension_to_targets,
             commands::list_pair_sharing,
             commands::apply_pair_sharing,
+            commands::create_code_profile,
             commands::list_code_installs,
             commands::list_code_history,
             commands::list_pair_code_history_sharing,

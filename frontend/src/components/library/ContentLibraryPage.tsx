@@ -412,13 +412,33 @@ export default function ContentLibraryPage() {
     [rowsByKind, activeKind],
   );
 
+  const [newWantsDesktop, setNewWantsDesktop] = useState(true);
+  const [newWantsCode, setNewWantsCode] = useState(true);
+  const [newSeedCode, setNewSeedCode] = useState(true);
+
   const handleCreate = useCallback(async () => {
     const name = newProfileName.trim();
     if (!name) return;
+    if (!newWantsDesktop && !newWantsCode) {
+      push("Pick at least one of Desktop / Code CLI.", "error");
+      return;
+    }
     setBusy(true);
     try {
-      const created = await api.createDesktopProfile(name);
-      push(`Created profile "${created.name}".`, "success");
+      const parts: string[] = [];
+      if (newWantsDesktop) {
+        const created = await api.createDesktopProfile(name);
+        parts.push(`Desktop launcher (${created.name})`);
+      }
+      if (newWantsCode) {
+        const created = await api.createCodeProfile(name, newSeedCode);
+        parts.push(
+          `Code CLI alias ${created.alias_name ?? `claude-${name}`}${
+            newSeedCode ? " (seeded)" : ""
+          }`,
+        );
+      }
+      push(`Created: ${parts.join(" + ")}.`, "success");
       setNewProfileName("");
       await loadInstalls();
     } catch (e) {
@@ -426,7 +446,14 @@ export default function ContentLibraryPage() {
     } finally {
       setBusy(false);
     }
-  }, [newProfileName, loadInstalls, push]);
+  }, [
+    newProfileName,
+    newWantsDesktop,
+    newWantsCode,
+    newSeedCode,
+    loadInstalls,
+    push,
+  ]);
 
   const activeRows = rowsByKind[activeKind] ?? [];
   const selectedRowId =
@@ -475,8 +502,8 @@ export default function ContentLibraryPage() {
           </div>
         </div>
 
-        <div className="mx-2 mt-auto border-t border-border/60 px-1 pt-3">
-          <div className="mb-1 px-2 font-sans text-[10px] uppercase tracking-[0.14em] text-muted-foreground/80">
+        <div className="mx-2 mt-auto space-y-2 border-t border-border/60 px-1 pt-3">
+          <div className="px-2 font-sans text-[10px] uppercase tracking-[0.14em] text-muted-foreground/80">
             New profile
           </div>
           <div className="flex gap-1">
@@ -501,6 +528,44 @@ export default function ContentLibraryPage() {
               <Plus className="h-3.5 w-3.5" />
             </Button>
           </div>
+          {/* Two checkboxes — sets up Desktop launcher AND/OR Code CLI alias
+           *  in a single click. If both are on, we run the Desktop and Code
+           *  side back-to-back and combine the success toast. */}
+          <label className="flex cursor-pointer items-center gap-2 px-2 font-sans text-[11px] text-foreground/85">
+            <Checkbox
+              checked={newWantsDesktop}
+              onCheckedChange={(v) => setNewWantsDesktop(v === true)}
+              disabled={busy}
+              className="h-3.5 w-3.5"
+            />
+            Desktop launcher
+          </label>
+          <label className="flex cursor-pointer items-center gap-2 px-2 font-sans text-[11px] text-foreground/85">
+            <Checkbox
+              checked={newWantsCode}
+              onCheckedChange={(v) => setNewWantsCode(v === true)}
+              disabled={busy}
+              className="h-3.5 w-3.5"
+            />
+            Code CLI alias
+          </label>
+          {newWantsCode ? (
+            <label
+              className={cn(
+                "flex cursor-pointer items-start gap-2 pl-6 pr-2 font-sans text-[10px]",
+                busy ? "text-muted-foreground/50" : "text-muted-foreground",
+              )}
+              title="Copy skills, plugins, MCP servers from ~/.claude. Excludes chat history and credentials."
+            >
+              <Checkbox
+                checked={newSeedCode}
+                onCheckedChange={(v) => setNewSeedCode(v === true)}
+                disabled={busy}
+                className="mt-0.5 h-3 w-3"
+              />
+              <span>Seed CLI config from ~/.claude (skills, plugins, MCP)</span>
+            </label>
+          ) : null}
         </div>
       </aside>
 
