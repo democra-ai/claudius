@@ -3675,7 +3675,8 @@ pub struct ProfileIdentity {
     pub last_activity_ms: Option<i64>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+// `f32` doesn't implement Eq (NaN), so this struct can only be PartialEq.
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct ProfileStats {
     pub install_id: String,
     pub install_name: String,
@@ -3692,6 +3693,21 @@ pub struct ProfileStats {
     /// "YYYY-MM-DD" the tokens_today count is for. If stale (not today),
     /// the count is from a previous day and Desktop hasn't reset yet.
     pub tokens_today_date: Option<String>,
+    /// codexbar-style time-window session counts. Computed from session
+    /// files' lastActivityAt — gives the user the "do I have headroom?"
+    /// reading without needing an Anthropic-side quota response.
+    pub code_sessions_last_5h: u32,
+    pub code_sessions_last_24h: u32,
+    pub code_sessions_last_7d: u32,
+    pub code_sessions_last_30d: u32,
+    /// Avg sessions/day over the last 7 days (excluding today) — the
+    /// "pace baseline" the UI compares today against.
+    pub code_sessions_per_day_baseline: f32,
+    /// Sessions started today. Same number drives the Today bar.
+    pub code_sessions_today: u32,
+    /// Most-used model across all code sessions in last 7d, normalized
+    /// (e.g. "opus-4-7"). Top model only.
+    pub top_model_last_7d: Option<String>,
     /// Device identifier from `ant-did` (base64-decoded UUID). Useful to
     /// spot when two profiles think they're on different machines.
     pub device_id: Option<String>,
@@ -3723,6 +3739,100 @@ pub struct ProfileStats {
     pub link_group: Option<String>,
     /// install_ids of other profiles that share this workspace.
     pub shared_with: Vec<String>,
+}
+
+/// Aggregate time-windowed session counts and model usage. Computed from
+/// the same session files the matrix view scans.
+struct CodeUsageWindows {
+    last_5h: u32,
+    last_24h: u32,
+    last_7d: u32,
+    last_30d: u32,
+    today: u32,
+    /// Avg sessions per day over the previous 7 days, excluding today.
+    /// Returns 0.0 when there's not enough history.
+    per_day_baseline: f32,
+    top_model: Option<String>,
+}
+
+fn compute_code_usage_windows(sessions: &[LocalSession]) -> CodeUsageWindows {
+    let now = Utc::now().timestamp_millis();
+    let one_hour: i64 = 3_600_000;
+    let one_day: i64 = 86_400_000;
+    let mut last_5h = 0;
+    let mut last_24h = 0;
+    let mut last_7d = 0;
+    let mut last_30d = 0;
+    // Sessions per day for the last 8 days, indexed 0..=7 where 0 = today.
+    let mut per_day = [0_u32; 8];
+    // Today in epoch days (UTC start of day).
+    let today_epoch_day = now / one_day;
+
+    let mut model_counts: HashMap<String, u32> = HashMap::new();
+
+    for s in sessions {
+        let t = s.last_activity_ms;
+        if t == 0 {
+            continue;
+        }
+        let dt = now - t;
+        if dt < 5 * one_hour {
+            last_5h += 1;
+        }
+        if dt < one_day {
+            last_24h += 1;
+        }
+        if dt < 7 * one_day {
+            last_7d += 1;
+            if let Some(m) = &s.model {
+                let normalized = normalize_model_id(m);
+                *model_counts.entry(normalized).or_insert(0) += 1;
+            }
+        }
+        if dt < 30 * one_day {
+            last_30d += 1;
+        }
+        let session_epoch_day = t / one_day;
+        let days_ago = (today_epoch_day - session_epoch_day) as i64;
+        if (0..8).contains(&days_ago) {
+            per_day[days_ago as usize] += 1;
+        }
+    }
+
+    let today_count = per_day[0];
+    let prior_7_sum: u32 = per_day[1..=7].iter().sum();
+    let per_day_baseline = (prior_7_sum as f32) / 7.0;
+
+    let top_model = model_counts
+        .into_iter()
+        .max_by_key(|(_, n)| *n)
+        .map(|(m, _)| m);
+
+    CodeUsageWindows {
+        last_5h,
+        last_24h,
+        last_7d,
+        last_30d,
+        today: today_count,
+        per_day_baseline,
+        top_model,
+    }
+}
+
+/// Drop `[1m]` / `[200k]` / etc. suffixes; lowercase the rest. e.g.
+/// "claude-opus-4-7[1m]" → "opus-4-7".
+fn normalize_model_id(raw: &str) -> String {
+    let cleaned: String = raw
+        .split('[')
+        .next()
+        .unwrap_or(raw)
+        .trim()
+        .to_string();
+    cleaned
+        .strip_prefix("claude-")
+        .map(|s| s.to_string())
+        .unwrap_or(cleaned)
+        .to_lowercase()
 }
 
 /// Read tokens-today count from buddy-tokens.json. Missing file → (0, None).
@@ -3958,6 +4068,11 @@ pub fn get_profile_stats(install_id: String) -> Result<ProfileStats, String> {
     let ssh_remote_count = read_ssh_remote_count(&data_dir);
     let cowork_agent_bytes = dir_disk_bytes(&cowork_sessions_root(&data_dir));
 
+    // Time-windowed counts from actual code panel session files (richer
+    // than the aggregate stat which only carries totals).
+    let code_sessions_all = scan_sessions_under(&code_sessions_root(&data_dir));
+    let windows = compute_code_usage_windows(&code_sessions_all);
+
     Ok(ProfileStats {
         install_id: install.id,
         install_name: install.name,
@@ -3968,6 +4083,13 @@ pub fn get_profile_stats(install_id: String) -> Result<ProfileStats, String> {
         identities,
         tokens_today,
         tokens_today_date,
+        code_sessions_last_5h: windows.last_5h,
+        code_sessions_last_24h: windows.last_24h,
+        code_sessions_last_7d: windows.last_7d,
+        code_sessions_last_30d: windows.last_30d,
+        code_sessions_per_day_baseline: windows.per_day_baseline,
+        code_sessions_today: windows.today,
+        top_model_last_7d: windows.top_model,
         device_id,
         ssh_remote_count,
         disk_bytes: dir_disk_bytes(&data_dir),
