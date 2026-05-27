@@ -1,0 +1,115 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 720" font-family="-apple-system, BlinkMacSystemFont, 'Geist', sans-serif" role="img" aria-label="Mockup of the profile detail right-rail panel showing today's token usage, session windows, account identities, storage breakdown, content counts, and sharing status.">
+  <title>Profile detail — codexbar-style stat sheet (mock data)</title>
+
+  <defs>
+    <filter id="cardShadow" x="-5%" y="-5%" width="110%" height="110%">
+      <feDropShadow dx="0" dy="3" stdDeviation="6" flood-color="#3d3929" flood-opacity="0.10"/>
+    </filter>
+  </defs>
+
+  <rect width="360" height="720" fill="#fbfaf6"/>
+  <rect x="0" y="0" width="360" height="720" fill="#fbfaf6" stroke="#e2dccb" stroke-width="1"/>
+
+  <!-- Header -->
+  <g>
+    <rect x="0" y="0" width="360" height="92" fill="#c96442" fill-opacity="0.04"/>
+    <text x="20" y="22" font-size="9" letter-spacing="2" fill="#83786b">DEFAULT DESKTOP</text>
+    <text x="115" y="22" font-size="9" letter-spacing="1.5" font-weight="600" fill="#c96442">● LIVE</text>
+    <text x="20" y="50" font-family="Georgia, 'Iowan Old Style', serif" font-size="26" font-style="italic" fill="#3d3929">work</text>
+    <rect x="280" y="36" width="62" height="18" rx="9" fill="#c96442" fill-opacity="0.15"/>
+    <text x="311" y="49" text-anchor="middle" font-size="9" font-weight="600" letter-spacing="1.2" fill="#c96442">HEAVY DAY</text>
+    <text x="20" y="78" font-size="10" fill="#83786b">Active · Updated just now</text>
+    <line x1="0" y1="92" x2="360" y2="92" stroke="#e2dccb" stroke-width="1"/>
+  </g>
+
+  <!-- Today bar -->
+  <g transform="translate(20, 110)">
+    <text x="0" y="0" font-size="12" font-weight="500" fill="#3d3929">Today</text>
+    <text x="320" y="0" text-anchor="end" font-size="10" fill="#83786b">today</text>
+    <rect x="0" y="10" width="320" height="3" rx="1.5" fill="#ece9dd"/>
+    <rect x="0" y="10" width="270" height="3" rx="1.5" fill="#c96442"/>
+    <text x="0" y="30" font-size="11" fill="#3d3929">847,392 tokens</text>
+    <text x="320" y="30" text-anchor="end" font-size="10" font-family="ui-monospace, Menlo, monospace" fill="#83786b">84% of 1M</text>
+  </g>
+
+  <!-- Last 5 hours bar -->
+  <g transform="translate(20, 168)">
+    <text x="0" y="0" font-size="12" font-weight="500" fill="#3d3929">Last 5 hours</text>
+    <rect x="0" y="10" width="320" height="3" rx="1.5" fill="#ece9dd"/>
+    <rect x="0" y="10" width="192" height="3" rx="1.5" fill="#c96442"/>
+    <text x="0" y="30" font-size="11" fill="#3d3929">3 code sessions</text>
+    <text x="320" y="30" text-anchor="end" font-size="10" font-family="ui-monospace, Menlo, monospace" fill="#83786b">rolling window</text>
+  </g>
+
+  <!-- Last 7 days bar -->
+  <g transform="translate(20, 226)">
+    <text x="0" y="0" font-size="12" font-weight="500" fill="#3d3929">Last 7 days</text>
+    <text x="320" y="0" text-anchor="end" font-size="10" fill="#83786b" font-family="ui-monospace, Menlo, monospace">opus-4-7</text>
+    <rect x="0" y="10" width="320" height="3" rx="1.5" fill="#ece9dd"/>
+    <rect x="0" y="10" width="256" height="3" rx="1.5" fill="#c96442"/>
+    <text x="0" y="30" font-size="11" fill="#3d3929">28 code sessions</text>
+    <text x="320" y="30" text-anchor="end" font-size="10" font-family="ui-monospace, Menlo, monospace" fill="#83786b">94 in 30d</text>
+    <text x="0" y="46" font-size="10" fill="#83786b">↗ 41% above 7d baseline (4.2/d)</text>
+  </g>
+
+  <line x1="20" y1="296" x2="340" y2="296" stroke="#e2dccb" stroke-width="0.8"/>
+
+  <!-- Accounts -->
+  <g transform="translate(20, 312)">
+    <text x="0" y="0" font-size="9.5" letter-spacing="2" font-weight="500" fill="#83786b">ACCOUNTS IN THIS PROFILE</text>
+    <text x="320" y="0" text-anchor="end" font-size="9.5" fill="#83786b">2 accounts</text>
+
+    <!-- Owner card -->
+    <rect x="0" y="10" width="320" height="56" rx="6" fill="#c96442" fill-opacity="0.05" stroke="#c96442" stroke-opacity="0.3"/>
+    <text x="12" y="28" font-size="11.5" fill="#3d3929">👤 Alex Rivera</text>
+    <rect x="266" y="18" width="44" height="14" rx="7" fill="#c96442" fill-opacity="0.18"/>
+    <text x="288" y="28" text-anchor="middle" font-size="8" letter-spacing="1.2" fill="#c96442" font-weight="600">OWNER</text>
+    <text x="12" y="44" font-size="10" font-family="ui-monospace, Menlo, monospace" fill="#3d3929">@ alex@example.com</text>
+    <text x="12" y="58" font-size="9.5" font-family="ui-monospace, Menlo, monospace" fill="#83786b">acct 7a3c91b2 · 8 agent runs · 12h ago</text>
+
+    <!-- Co-user card -->
+    <rect x="0" y="74" width="320" height="56" rx="6" fill="#ffffff" stroke="#e2dccb"/>
+    <text x="12" y="92" font-size="11.5" fill="#3d3929">👤 Sam Park</text>
+    <rect x="262" y="82" width="50" height="14" rx="7" fill="#ece9dd"/>
+    <text x="287" y="92" text-anchor="middle" font-size="8" letter-spacing="1.2" fill="#83786b" font-weight="600">CO-USER</text>
+    <text x="12" y="108" font-size="10" font-family="ui-monospace, Menlo, monospace" fill="#3d3929">@ sam@example.com</text>
+    <text x="12" y="122" font-size="9.5" font-family="ui-monospace, Menlo, monospace" fill="#83786b">acct 1f8e44d0 · 2 agent runs · 3d ago</text>
+  </g>
+
+  <!-- Storage -->
+  <g transform="translate(20, 460)">
+    <text x="0" y="0" font-size="9.5" letter-spacing="2" font-weight="500" fill="#83786b">STORAGE</text>
+    <text x="320" y="0" text-anchor="end" font-size="9.5" font-family="ui-monospace, Menlo, monospace" fill="#83786b">9.20 GB</text>
+    <rect x="0" y="10" width="320" height="56" rx="6" fill="#f5f4ee"/>
+    <text x="14" y="28" font-size="10.5" fill="#3d3929">💬  Code panel</text>
+    <text x="306" y="28" text-anchor="end" font-size="10.5" font-family="ui-monospace, Menlo, monospace" fill="#3d3929">2.1 GB</text>
+    <text x="14" y="46" font-size="10.5" fill="#3d3929">✨  Cowork agent</text>
+    <text x="306" y="46" text-anchor="end" font-size="10.5" font-family="ui-monospace, Menlo, monospace" fill="#3d3929">5.4 GB</text>
+    <text x="14" y="62" font-size="10.5" fill="#83786b">other</text>
+    <text x="306" y="62" text-anchor="end" font-size="10.5" font-family="ui-monospace, Menlo, monospace" fill="#83786b">1.7 GB</text>
+  </g>
+
+  <!-- Content -->
+  <g transform="translate(20, 548)">
+    <text x="0" y="0" font-size="9.5" letter-spacing="2" font-weight="500" fill="#83786b">CONTENT</text>
+    <rect x="0" y="10" width="320" height="72" rx="6" fill="#f5f4ee"/>
+    <text x="14" y="28" font-size="10.5" fill="#3d3929">▦  Extensions</text>
+    <text x="306" y="28" text-anchor="end" font-size="10.5" font-family="ui-monospace, Menlo, monospace" fill="#3d3929">4</text>
+    <text x="14" y="46" font-size="10.5" fill="#3d3929">⬢  MCP servers</text>
+    <text x="306" y="46" text-anchor="end" font-size="10.5" font-family="ui-monospace, Menlo, monospace" fill="#3d3929">2</text>
+    <text x="14" y="64" font-size="10.5" fill="#3d3929">🔨  Cowork skills</text>
+    <text x="306" y="64" text-anchor="end" font-size="10.5" font-family="ui-monospace, Menlo, monospace" fill="#3d3929">8</text>
+    <text x="14" y="80" font-size="10.5" fill="#3d3929">🖥  SSH remotes</text>
+    <text x="306" y="80" text-anchor="end" font-size="10.5" font-family="ui-monospace, Menlo, monospace" fill="#3d3929">1</text>
+  </g>
+
+  <!-- Sharing -->
+  <g transform="translate(20, 652)">
+    <text x="0" y="0" font-size="9.5" letter-spacing="2" font-weight="500" fill="#83786b">SHARING</text>
+    <text x="0" y="20" font-size="10.5" fill="#3d3929">Workspace link</text>
+    <text x="320" y="20" text-anchor="end" font-size="10.5" font-family="ui-monospace, Menlo, monospace" fill="#c96442">a3f2c1f8</text>
+    <text x="0" y="38" font-size="10" fill="#83786b">Shared with: </text>
+    <rect x="76" y="28" width="38" height="14" rx="7" fill="#c96442" fill-opacity="0.12"/>
+    <text x="95" y="38" text-anchor="middle" font-size="9" font-family="ui-monospace, Menlo, monospace" fill="#c96442">work</text>
+  </g>
+</svg>
