@@ -1,9 +1,26 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Claudius compact mark: three stacked rounded copper squares.">
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="Claudius compact mark: three stacked rounded copper squares, top one marked with a tiny sunburst.">
   <title>Claudius</title>
-  <!-- Back card (faintest) -->
+  <defs>
+    <!-- Smaller 8-petal sunburst tuned for 32px contexts -->
+    <g id="cb-mark-sm">
+      <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" fill="currentColor"/>
+      <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" fill="currentColor" transform="rotate(45)"/>
+      <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" fill="currentColor" transform="rotate(90)"/>
+      <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" fill="currentColor" transform="rotate(135)"/>
+      <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" fill="currentColor" transform="rotate(180)"/>
+      <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" fill="currentColor" transform="rotate(225)"/>
+      <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" fill="currentColor" transform="rotate(270)"/>
+      <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" fill="currentColor" transform="rotate(315)"/>
+    </g>
+  </defs>
+  <!-- Back card -->
   <rect x="3" y="3" width="22" height="22" rx="6" fill="#c96442" fill-opacity="0.30"/>
   <!-- Middle card -->
   <rect x="5.5" y="5.5" width="22" height="22" rx="6" fill="#c96442" fill-opacity="0.62"/>
-  <!-- Front card (no C at 32px — too small to read, the stack carries it) -->
+  <!-- Front card -->
   <rect x="8" y="8" width="22" height="22" rx="6" fill="#c96442"/>
+  <!-- Tiny sunburst on front card -->
+  <g transform="translate(19, 19)" color="#fbfaf6">
+    <use href="#cb-mark-sm"/>
+  </g>
 </svg>

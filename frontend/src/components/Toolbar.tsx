@@ -40,9 +40,8 @@ export function Toolbar({ onRefresh, busy }: ToolbarProps) {
       className="flex h-[45px] items-center justify-between border-b bg-background pl-[80px] pr-4"
     >
       <div data-tauri-drag-region className="flex items-center gap-2.5">
-        {/* Logo: three stacked rounded squares (the 32-pt variant of the
-         *  app icon). At this size we drop the inner C — the stack alone
-         *  reads as "multiple profiles" and the C would be illegible. */}
+        {/* Logo: three stacked rounded squares with the Claude-style
+         *  sunburst on the top card. Matches the app icon's design. */}
         <svg
           data-tauri-drag-region
           width="22"
@@ -53,6 +52,17 @@ export function Toolbar({ onRefresh, busy }: ToolbarProps) {
           <rect x="3" y="3" width="22" height="22" rx="6" fill="hsl(var(--primary))" fillOpacity="0.30" />
           <rect x="5.5" y="5.5" width="22" height="22" rx="6" fill="hsl(var(--primary))" fillOpacity="0.62" />
           <rect x="8" y="8" width="22" height="22" rx="6" fill="hsl(var(--primary))" />
+          {/* 8-petal sunburst centered on the front card */}
+          <g transform="translate(19, 19)" fill="hsl(var(--primary-foreground))">
+            <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" />
+            <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" transform="rotate(45)" />
+            <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" transform="rotate(90)" />
+            <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" transform="rotate(135)" />
+            <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" transform="rotate(180)" />
+            <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" transform="rotate(225)" />
+            <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" transform="rotate(270)" />
+            <path d="M 0,0 Q 1.2,-3.2 0,-6.5 Q -1.2,-3.2 0,0 Z" transform="rotate(315)" />
+          </g>
         </svg>
         <h1
           data-tauri-drag-region
