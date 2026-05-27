@@ -173,20 +173,29 @@ export function Matrix({
                     animationDelay: `${Math.min(rowIdx * 12, 240)}ms`,
                   }}
                 >
-                  {/* Row label */}
+                  {/* Row label — `min-w-0` lets it respect the grid column
+                   *  instead of expanding to its intrinsic content width.
+                   *  `overflow-hidden` confines the truncate/line-clamp. */}
                   <button
                     type="button"
                     onClick={() => onRowSelect(isSelected ? null : row.id)}
                     className={cn(
-                      "flex flex-col items-start justify-center gap-0.5 border-r px-4 py-2 text-left transition-colors",
+                      "flex min-w-0 flex-col items-start justify-center gap-0.5 overflow-hidden border-r px-4 py-2 text-left transition-colors",
                       "hover:bg-muted/40",
                       isSelected && "border-l-2 border-l-primary",
                     )}
-                    title={row.id}
+                    title={
+                      row.label !== row.id
+                        ? `${row.label}\n${row.id}`
+                        : row.id
+                    }
                   >
+                    {/* Label: wrap up to 2 lines for session titles, then ellipsis.
+                     *  `block w-full` makes line-clamp actually box-constrained
+                     *  rather than overflowing into the cells column. */}
                     <span
                       className={cn(
-                        "truncate font-sans text-[13px]",
+                        "block w-full font-sans text-[13px] leading-snug line-clamp-2 break-words",
                         isSelected
                           ? "font-medium text-foreground"
                           : "text-foreground/85",
@@ -195,11 +204,11 @@ export function Matrix({
                       {row.label}
                     </span>
                     {row.description ? (
-                      <span className="line-clamp-1 font-sans text-[10px] text-muted-foreground/80">
+                      <span className="block w-full truncate font-sans text-[10px] text-muted-foreground/80">
                         {row.description}
                       </span>
                     ) : row.label !== row.id ? (
-                      <span className="truncate font-mono text-[10px] text-muted-foreground/70">
+                      <span className="block w-full truncate font-mono text-[10px] text-muted-foreground/70">
                         {row.id}
                       </span>
                     ) : null}

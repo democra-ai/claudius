@@ -60,7 +60,10 @@ export function MatrixCell({
             onToggle(rowId, cell.install_id, !cell.present /* desired */)
           }
           className={cn(
-            "flex h-10 w-full items-center justify-center transition-colors",
+            // `min-h-10` keeps the 40px floor for short rows; `h-full` lets
+            // tall rows (e.g. session-title labels that wrap to 2 lines)
+            // stretch the cell to match, so the glyph stays centered.
+            "flex min-h-10 h-full w-full items-center justify-center transition-colors",
             "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
             interactive ? "hover:bg-primary/8" : "hover:bg-muted/40 cursor-default",
             isPending && "bg-amber-500/10 ring-1 ring-inset ring-amber-500/30",
