@@ -57,7 +57,7 @@ WHAT IS A PROFILE?
   Claude Code (the terminal CLI), independently or together.
 
 LEARN MORE
-  https://github.com/jmdarre-v/claude-multiprofile
+  https://github.com/democra-ai/claude-multiprofile
 `;
 
 // Interactive menu shown when the user runs `claude-multiprofile` with no

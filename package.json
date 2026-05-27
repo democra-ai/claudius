@@ -15,7 +15,13 @@
   ],
   "scripts": {
     "start": "node ./bin/claude-multiprofile.js",
-    "test": "node --test test/unit.test.js"
+    "test": "node --test test/unit.test.js",
+    "frontend:install": "npm --prefix frontend install",
+    "frontend:dev": "npm --prefix frontend run dev",
+    "frontend:build": "npm --prefix frontend run build",
+    "frontend:typecheck": "npm --prefix frontend run typecheck",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
   },
   "engines": {
     "node": ">=18"
@@ -34,8 +40,11 @@
   "dependencies": {
     "@inquirer/prompts": "^7.0.0"
   },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0"
+  },
   "repository": {
     "type": "git",
-    "url": "https://github.com/jmdarre-v/claude-multiprofile.git"
+    "url": "https://github.com/democra-ai/claude-multiprofile.git"
   }
 }
