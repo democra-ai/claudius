@@ -22,21 +22,21 @@ export function Toolbar({ onRefresh, busy }: ToolbarProps) {
   const { theme, toggle } = useTheme();
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : SunMoon;
 
-  // Two-tier chrome. Native macOS title bar (28px) above shows ONLY the
-  // traffic lights — `hiddenTitle: true` strips the app-name text so there
-  // is no duplication. This <header> is the second tier, sitting flush
-  // below the native bar with the app's own branding + actions.
+  // Single-row chrome via `transparent: true + titleBarStyle: Overlay`.
+  // The `transparent: true` window flag makes the macOS title-bar zone
+  // truly transparent — no vibrancy material on top — so the webview
+  // bg shows through behind the traffic lights instead of stacking
+  // them on a separate band.
   //
-  // We tried `titleBarStyle: "Overlay"` for a single-row Cursor-style
-  // look, but Tauri 2's overlay pushes webview content down by the
-  // title-bar-zone height regardless of CSS, leaving the lights and the
-  // content visibly stacked on two rows anyway. Going with explicit two
-  // tiers gives macOS-native alignment of the lights and a clean,
-  // predictable layout below.
+  // pl-[80px] reserves horizontal room for the lights cluster
+  // (~70px starting at x=18). bg-background (no /95 opacity) is
+  // required because transparent windows compose with whatever's
+  // behind — using a translucent value would let the desktop show
+  // through.
   return (
     <header
       data-tauri-drag-region
-      className="flex h-11 items-center justify-between border-b bg-background/95 px-4 backdrop-blur supports-[backdrop-filter]:bg-background/60"
+      className="flex h-11 items-center justify-between border-b bg-background pl-[80px] pr-4"
     >
       <div data-tauri-drag-region className="flex items-center gap-2.5">
         <div
