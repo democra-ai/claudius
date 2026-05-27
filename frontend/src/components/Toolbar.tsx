@@ -23,12 +23,22 @@ export function Toolbar({ onRefresh, busy }: ToolbarProps) {
   const ThemeIcon = theme === "dark" ? Moon : theme === "light" ? Sun : SunMoon;
 
   return (
-    <header className="flex h-12 items-center justify-between border-b bg-background/95 px-5 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex items-center gap-3">
+    <header
+      // `data-tauri-drag-region` makes the empty space of the bar draggable
+      // like a native title bar. `pl-[88px]` leaves room for the macOS
+      // traffic-light cluster — Tauri's `titleBarStyle: Overlay` shows them
+      // on top of the webview at x≈18, and the cluster is ~70px wide.
+      data-tauri-drag-region
+      className="flex h-12 items-center justify-between border-b bg-background/95 pl-[88px] pr-5 backdrop-blur supports-[backdrop-filter]:bg-background/60"
+    >
+      <div className="flex items-center gap-3" data-tauri-drag-region>
         <div className="flex h-7 w-7 items-center justify-center rounded-md bg-primary font-display text-[14px] font-semibold text-primary-foreground">
           C
         </div>
-        <h1 className="font-display text-[16px] leading-none tracking-tight">
+        <h1
+          className="font-display text-[16px] leading-none tracking-tight"
+          data-tauri-drag-region
+        >
           Claude Multiprofile
         </h1>
       </div>
