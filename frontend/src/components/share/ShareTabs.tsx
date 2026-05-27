@@ -25,9 +25,9 @@ type TabDef = {
 const DESKTOP_TABS: TabDef[] = [
   { value: "extensions", label: "Extensions", icon: Blocks, ready: true },
   { value: "code_history", label: "Code History", icon: MessagesSquare, ready: true },
-  { value: "mcp_servers", label: "MCP Servers", icon: Boxes, ready: false },
-  { value: "cowork_skills", label: "Cowork Skills", icon: Hammer, ready: false },
-  { value: "preferences", label: "Preferences", icon: Settings2, ready: false },
+  { value: "mcp_servers", label: "MCP Servers", icon: Boxes, ready: true },
+  { value: "cowork_skills", label: "Cowork Skills", icon: Hammer, ready: true },
+  { value: "preferences", label: "Preferences", icon: Settings2, ready: true },
 ];
 
 const CODE_TABS: TabDef[] = [

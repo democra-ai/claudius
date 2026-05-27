@@ -6,9 +6,15 @@ import type {
   DesktopInstall,
   PairCodeProjectShare,
   PairCodeShareChange,
+  PairCoworkSkillChange,
+  PairCoworkSkillsResult,
   PairDesktopCodeHistory,
   PairDesktopCodeHistoryChange,
   PairExtensionShare,
+  PairMcpServerChange,
+  PairMcpServerShare,
+  PairPreferenceChange,
+  PairPreferenceShare,
   PairShareChange,
 } from "@/types";
 
@@ -105,6 +111,76 @@ export const api = {
       sourceDataDir,
       targetDataDir,
       change,
+    });
+  },
+
+  // -------- Desktop MCP server sharing --------
+  // Targets `mcpServers` in <dataDir>/claude_desktop_config.json.
+  listPairMcpSharing(
+    sourceDataDir: string,
+    targetDataDir: string,
+  ): Promise<PairMcpServerShare[]> {
+    return invoke("list_pair_mcp_sharing", { sourceDataDir, targetDataDir });
+  },
+
+  applyPairMcpSharing(
+    sourceDataDir: string,
+    targetDataDir: string,
+    changes: PairMcpServerChange[],
+  ): Promise<CopySummary> {
+    return invoke("apply_pair_mcp_sharing", {
+      sourceDataDir,
+      targetDataDir,
+      changes,
+    });
+  },
+
+  // -------- Desktop Cowork Skills sharing --------
+  // Targets <dataDir>/local-agent-mode-sessions/skills-plugin/<dev>/<acct>/.
+  listPairCoworkSkillsSharing(
+    sourceDataDir: string,
+    targetDataDir: string,
+  ): Promise<PairCoworkSkillsResult> {
+    return invoke("list_pair_cowork_skills_sharing", {
+      sourceDataDir,
+      targetDataDir,
+    });
+  },
+
+  applyPairCoworkSkillsSharing(
+    sourceDataDir: string,
+    targetDataDir: string,
+    changes: PairCoworkSkillChange[],
+  ): Promise<CopySummary> {
+    return invoke("apply_pair_cowork_skills_sharing", {
+      sourceDataDir,
+      targetDataDir,
+      changes,
+    });
+  },
+
+  // -------- Desktop Preferences sharing --------
+  // Targets allowlisted keys in <dataDir>/config.json and
+  // <dataDir>/claude_desktop_config.json → preferences.
+  listPairPreferenceSharing(
+    sourceDataDir: string,
+    targetDataDir: string,
+  ): Promise<PairPreferenceShare[]> {
+    return invoke("list_pair_preference_sharing", {
+      sourceDataDir,
+      targetDataDir,
+    });
+  },
+
+  applyPairPreferenceSharing(
+    sourceDataDir: string,
+    targetDataDir: string,
+    changes: PairPreferenceChange[],
+  ): Promise<CopySummary> {
+    return invoke("apply_pair_preference_sharing", {
+      sourceDataDir,
+      targetDataDir,
+      changes,
     });
   },
 };

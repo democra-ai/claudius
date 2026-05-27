@@ -1953,6 +1953,713 @@ pub fn apply_pair_code_history_sharing(
     Ok(CopySummary { copied, skipped })
 }
 
+// ---------------------------------------------------------------------------
+// Pair sharing — MCP servers, Cowork Skills, Preferences
+// ---------------------------------------------------------------------------
+// These three sharing kinds were `ComingSoonPane` placeholders before; this
+// block adds the real backend. The design lives in
+// docs/plans/2026-05-27-share-redesign.md.
+//
+// Two sharing models coexist with the existing Extensions/Code-history code:
+//
+//   Model A — Symlink swap (live share). Unit is a file or directory. Used
+//             here for Cowork Skills (per-skill folder under skills-plugin/).
+//             Existing helpers (symlink_path, path_points_to, remove_path,
+//             backup_existing_path) carry the weight.
+//
+//   Model B — Copy on apply (one-shot). Unit is a JSON key inside a config
+//             file (mcpServers entries, individual preference keys). The
+//             helpers below — read_desktop_config, write_json_atomically —
+//             do atomic temp-file+rename so we never leave a half-written
+//             config behind even if the process is killed mid-write.
+
+const DESKTOP_CONFIG_FILE: &str = "claude_desktop_config.json";
+const UI_CONFIG_FILE: &str = "config.json";
+const SKILLS_PLUGIN_REL: &str = "local-agent-mode-sessions/skills-plugin";
+const SKILLS_MANIFEST_FILE: &str = "manifest.json";
+const SKILLS_SUBDIR: &str = "skills";
+
+/// Read a JSON config file. Missing file → empty object. Unparseable → error.
+fn read_json_file_or_empty(path: &Path) -> Result<serde_json::Value, String> {
+    match fs::read_to_string(path) {
+        Ok(raw) if raw.trim().is_empty() => Ok(serde_json::json!({})),
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|e| format!("Parse {}: {e}", path.display())),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(serde_json::json!({})),
+        Err(e) => Err(format!("Read {}: {e}", path.display())),
+    }
+}
+
+fn read_desktop_config(data_dir: &Path) -> Result<serde_json::Value, String> {
+    read_json_file_or_empty(&data_dir.join(DESKTOP_CONFIG_FILE))
+}
+
+fn read_ui_config(data_dir: &Path) -> Result<serde_json::Value, String> {
+    read_json_file_or_empty(&data_dir.join(UI_CONFIG_FILE))
+}
+
+/// Pretty-print `value` to `<path>.tmp` then rename over `path`. The rename
+/// is atomic on the same filesystem, so readers never see a torn write.
+fn write_json_atomically(path: &Path, value: &serde_json::Value) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|e| format!("Create {}: {e}", parent.display()))?;
+    }
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| format!("Invalid path: {}", path.display()))?;
+    let tmp = path.with_file_name(format!(".{file_name}.tmp"));
+    let pretty = serde_json::to_string_pretty(value)
+        .map_err(|e| format!("Serialize JSON: {e}"))?;
+    fs::write(&tmp, pretty).map_err(|e| format!("Write {}: {e}", tmp.display()))?;
+    fs::rename(&tmp, path)
+        .map_err(|e| format!("Rename {} -> {}: {e}", tmp.display(), path.display()))
+}
+
+fn now_unix_millis() -> i64 {
+    Utc::now().timestamp_millis()
+}
+
+// ----- MCP servers (Model B) -----
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairMcpServerShare {
+    pub name: String,
+    pub source_present: bool,
+    pub target_present: bool,
+    /// Short human-readable summary of source's value (command + first args, or url).
+    pub source_summary: Option<String>,
+    pub target_summary: Option<String>,
+    /// True iff source and target define this server and the values are deep-equal.
+    pub copied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PairMcpServerChange {
+    pub name: String,
+    /// New desired state: true = copy from source, false = remove from target.
+    pub copied: bool,
+}
+
+fn mcp_servers_obj(config: &serde_json::Value) -> Option<&serde_json::Map<String, serde_json::Value>> {
+    config.get("mcpServers").and_then(|v| v.as_object())
+}
+
+fn mcp_server_summary(value: &serde_json::Value) -> Option<String> {
+    if let Some(cmd) = value.get("command").and_then(|c| c.as_str()) {
+        let argstr = value
+            .get("args")
+            .and_then(|a| a.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .take(2)
+                    .filter_map(|v| v.as_str())
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            })
+            .filter(|s| !s.is_empty());
+        Some(match argstr {
+            Some(s) => format!("{cmd} {s}"),
+            None => cmd.to_string(),
+        })
+    } else {
+        value.get("url").and_then(|u| u.as_str()).map(|s| s.to_string())
+    }
+}
+
+pub fn list_pair_mcp_servers(
+    source_dir: &Path,
+    target_dir: &Path,
+) -> Result<Vec<PairMcpServerShare>, String> {
+    let source_cfg = read_desktop_config(source_dir)?;
+    let target_cfg = read_desktop_config(target_dir)?;
+    let empty = serde_json::Map::new();
+    let source_map = mcp_servers_obj(&source_cfg).unwrap_or(&empty);
+    let target_map = mcp_servers_obj(&target_cfg).unwrap_or(&empty);
+
+    let mut names: BTreeMap<String, ()> = BTreeMap::new();
+    for k in source_map.keys() {
+        names.insert(k.clone(), ());
+    }
+    for k in target_map.keys() {
+        names.insert(k.clone(), ());
+    }
+
+    Ok(names
+        .into_keys()
+        .map(|name| {
+            let src = source_map.get(&name);
+            let tgt = target_map.get(&name);
+            let copied = matches!((src, tgt), (Some(a), Some(b)) if a == b);
+            PairMcpServerShare {
+                source_summary: src.and_then(mcp_server_summary),
+                target_summary: tgt.and_then(mcp_server_summary),
+                source_present: src.is_some(),
+                target_present: tgt.is_some(),
+                copied,
+                name,
+            }
+        })
+        .collect())
+}
+
+fn set_pair_mcp_server_copied(
+    source_dir: &Path,
+    target_dir: &Path,
+    name: &str,
+    copied: bool,
+) -> Result<bool, String> {
+    let source_cfg = read_desktop_config(source_dir)?;
+    let mut target_cfg = read_desktop_config(target_dir)?;
+    let source_value = mcp_servers_obj(&source_cfg)
+        .and_then(|m| m.get(name))
+        .cloned();
+    let target_value = mcp_servers_obj(&target_cfg)
+        .and_then(|m| m.get(name))
+        .cloned();
+    let currently_copied = matches!((&source_value, &target_value), (Some(a), Some(b)) if a == b);
+    if currently_copied == copied {
+        return Ok(false);
+    }
+
+    let root = target_cfg
+        .as_object_mut()
+        .ok_or_else(|| "Target claude_desktop_config.json is not a JSON object".to_string())?;
+    let mcp_entry = root
+        .entry("mcpServers".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let mcp_obj = mcp_entry
+        .as_object_mut()
+        .ok_or_else(|| "mcpServers must be an object".to_string())?;
+
+    if copied {
+        let val = source_value
+            .ok_or_else(|| format!("Source has no mcpServers[\"{name}\"] to copy"))?;
+        mcp_obj.insert(name.to_string(), val);
+    } else {
+        mcp_obj.remove(name);
+    }
+
+    write_json_atomically(&target_dir.join(DESKTOP_CONFIG_FILE), &target_cfg)?;
+    Ok(true)
+}
+
+pub fn list_pair_mcp_sharing(
+    source_data_dir: String,
+    target_data_dir: String,
+) -> Result<Vec<PairMcpServerShare>, String> {
+    list_pair_mcp_servers(Path::new(&source_data_dir), Path::new(&target_data_dir))
+}
+
+pub fn apply_pair_mcp_sharing(
+    source_data_dir: String,
+    target_data_dir: String,
+    changes: Vec<PairMcpServerChange>,
+) -> Result<CopySummary, String> {
+    let source = Path::new(&source_data_dir);
+    let target = Path::new(&target_data_dir);
+    let mut copied = 0;
+    let mut skipped = 0;
+    for change in changes {
+        if set_pair_mcp_server_copied(source, target, &change.name, change.copied)? {
+            copied += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    Ok(CopySummary { copied, skipped })
+}
+
+// ----- Cowork Skills (Model A — symlink + manifest patch) -----
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairCoworkSkillShare {
+    pub skill_id: String,
+    pub name: String,
+    pub description: Option<String>,
+    pub source_present: bool,
+    pub target_present: bool,
+    pub source_enabled: bool,
+    pub target_enabled: bool,
+    /// True iff target/skills/<id> is a live symlink at source/skills/<id>
+    /// AND target manifest entry matches source's.
+    pub shared: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PairCoworkSkillChange {
+    pub skill_id: String,
+    pub shared: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PairCoworkSkillsResult {
+    pub rows: Vec<PairCoworkSkillShare>,
+    /// True iff the profile has never opened the Cowork panel — sharing
+    /// requires both sides to have a `<dev>/<acct>/` combo dir on disk.
+    pub source_needs_bootstrap: bool,
+    pub target_needs_bootstrap: bool,
+}
+
+fn skills_plugin_root(data_dir: &Path) -> PathBuf {
+    let mut p = data_dir.to_path_buf();
+    for segment in SKILLS_PLUGIN_REL.split('/') {
+        p.push(segment);
+    }
+    p
+}
+
+/// Resolve the most-recently-modified `<deviceId>/<accountId>/` combo under
+/// skills-plugin/. Claude Desktop writes into one combo at a time
+/// (current login), and on first launch creates exactly one — so picking
+/// the freshest is correct in practice.
+fn find_skills_combo_dir(data_dir: &Path) -> Result<Option<PathBuf>, String> {
+    let root = skills_plugin_root(data_dir);
+    let outer = match fs::read_dir(&root) {
+        Ok(d) => d,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("Read {}: {e}", root.display())),
+    };
+    let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
+    for outer_entry in outer {
+        let outer_entry = outer_entry.map_err(|e| format!("Read skills-plugin entry: {e}"))?;
+        let outer_path = outer_entry.path();
+        if !outer_path.is_dir() {
+            continue;
+        }
+        let inner = match fs::read_dir(&outer_path) {
+            Ok(d) => d,
+            Err(_) => continue,
+        };
+        for inner_entry in inner {
+            let inner_entry =
+                inner_entry.map_err(|e| format!("Read skills-plugin inner: {e}"))?;
+            let combo = inner_entry.path();
+            if !combo.is_dir() {
+                continue;
+            }
+            let mtime = fs::metadata(&combo)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::UNIX_EPOCH);
+            match &best {
+                None => best = Some((mtime, combo)),
+                Some((bm, _)) if mtime > *bm => best = Some((mtime, combo)),
+                _ => {}
+            }
+        }
+    }
+    Ok(best.map(|(_, p)| p))
+}
+
+fn read_skills_manifest(combo_dir: &Path) -> Result<serde_json::Value, String> {
+    let path = combo_dir.join(SKILLS_MANIFEST_FILE);
+    match fs::read_to_string(&path) {
+        Ok(raw) if raw.trim().is_empty() => Ok(serde_json::json!({ "skills": [] })),
+        Ok(raw) => serde_json::from_str(&raw)
+            .map_err(|e| format!("Parse {}: {e}", path.display())),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(serde_json::json!({ "skills": [] })),
+        Err(e) => Err(format!("Read {}: {e}", path.display())),
+    }
+}
+
+fn manifest_skill_entries(manifest: &serde_json::Value) -> Vec<&serde_json::Value> {
+    manifest
+        .get("skills")
+        .and_then(|s| s.as_array())
+        .map(|arr| arr.iter().collect())
+        .unwrap_or_default()
+}
+
+fn entry_skill_id(entry: &serde_json::Value) -> Option<&str> {
+    entry.get("skillId").and_then(|v| v.as_str())
+}
+
+fn entry_enabled(entry: &serde_json::Value) -> bool {
+    entry.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true)
+}
+
+pub fn list_pair_cowork_skills(
+    source_dir: &Path,
+    target_dir: &Path,
+) -> Result<PairCoworkSkillsResult, String> {
+    let source_combo = find_skills_combo_dir(source_dir)?;
+    let target_combo = find_skills_combo_dir(target_dir)?;
+
+    let source_manifest = match &source_combo {
+        Some(p) => read_skills_manifest(p)?,
+        None => serde_json::json!({ "skills": [] }),
+    };
+    let target_manifest = match &target_combo {
+        Some(p) => read_skills_manifest(p)?,
+        None => serde_json::json!({ "skills": [] }),
+    };
+
+    let mut by_id: BTreeMap<String, (Option<serde_json::Value>, Option<serde_json::Value>)> =
+        BTreeMap::new();
+    for entry in manifest_skill_entries(&source_manifest) {
+        if let Some(id) = entry_skill_id(entry) {
+            by_id.entry(id.to_string()).or_default().0 = Some(entry.clone());
+        }
+    }
+    for entry in manifest_skill_entries(&target_manifest) {
+        if let Some(id) = entry_skill_id(entry) {
+            by_id.entry(id.to_string()).or_default().1 = Some(entry.clone());
+        }
+    }
+
+    let mut rows = Vec::new();
+    for (id, (src_entry, tgt_entry)) in by_id.into_iter() {
+        let display_source = src_entry.as_ref().or(tgt_entry.as_ref());
+        let name = display_source
+            .and_then(|e| e.get("name").and_then(|v| v.as_str()))
+            .unwrap_or(&id)
+            .to_string();
+        let description = display_source
+            .and_then(|e| e.get("description").and_then(|v| v.as_str()))
+            .map(|s| s.to_string());
+        let source_enabled = src_entry.as_ref().map(entry_enabled).unwrap_or(false);
+        let target_enabled = tgt_entry.as_ref().map(entry_enabled).unwrap_or(false);
+
+        // "Shared" requires both manifest entries to match AND the on-disk
+        // folder to be a symlink. Either alone is just "Independent".
+        let mut shared = false;
+        if let (Some(src), Some(tgt), Some(src_combo), Some(tgt_combo)) = (
+            src_entry.as_ref(),
+            tgt_entry.as_ref(),
+            source_combo.as_ref(),
+            target_combo.as_ref(),
+        ) {
+            let src_folder = src_combo.join(SKILLS_SUBDIR).join(&id);
+            let tgt_folder = tgt_combo.join(SKILLS_SUBDIR).join(&id);
+            if path_points_to(&tgt_folder, &src_folder) && src == tgt {
+                shared = true;
+            }
+        }
+
+        rows.push(PairCoworkSkillShare {
+            source_present: src_entry.is_some(),
+            target_present: tgt_entry.is_some(),
+            source_enabled,
+            target_enabled,
+            shared,
+            name,
+            description,
+            skill_id: id,
+        });
+    }
+
+    Ok(PairCoworkSkillsResult {
+        rows,
+        source_needs_bootstrap: source_combo.is_none(),
+        target_needs_bootstrap: target_combo.is_none(),
+    })
+}
+
+fn set_pair_cowork_skill_shared(
+    source_dir: &Path,
+    target_dir: &Path,
+    skill_id: &str,
+    shared: bool,
+) -> Result<bool, String> {
+    let source_combo = find_skills_combo_dir(source_dir)?.ok_or_else(|| {
+        "Source profile has no Cowork skills folder yet — open the Cowork panel there once."
+            .to_string()
+    })?;
+    let target_combo = find_skills_combo_dir(target_dir)?.ok_or_else(|| {
+        "Target profile has no Cowork skills folder yet — open the Cowork panel there once."
+            .to_string()
+    })?;
+
+    let source_manifest = read_skills_manifest(&source_combo)?;
+    let mut target_manifest = read_skills_manifest(&target_combo)?;
+
+    let src_folder = source_combo.join(SKILLS_SUBDIR).join(skill_id);
+    let tgt_folder = target_combo.join(SKILLS_SUBDIR).join(skill_id);
+
+    let source_entry = manifest_skill_entries(&source_manifest)
+        .into_iter()
+        .find(|e| entry_skill_id(e) == Some(skill_id))
+        .cloned();
+    let target_entry = manifest_skill_entries(&target_manifest)
+        .into_iter()
+        .find(|e| entry_skill_id(e) == Some(skill_id))
+        .cloned();
+
+    let currently_shared = path_points_to(&tgt_folder, &src_folder)
+        && source_entry.is_some()
+        && source_entry == target_entry;
+    if currently_shared == shared {
+        return Ok(false);
+    }
+
+    if shared {
+        let entry = source_entry
+            .ok_or_else(|| format!("Source manifest has no entry for \"{skill_id}\""))?;
+        if !src_folder.exists() && fs::symlink_metadata(&src_folder).is_err() {
+            return Err(format!("Source skill folder missing: {}", src_folder.display()));
+        }
+        fs::create_dir_all(target_combo.join(SKILLS_SUBDIR))
+            .map_err(|e| format!("Create target skills dir: {e}"))?;
+        if tgt_folder.exists() || fs::symlink_metadata(&tgt_folder).is_ok() {
+            backup_existing_path(&tgt_folder, target_dir, skill_id)?;
+        }
+        symlink_path(&src_folder, &tgt_folder)?;
+
+        let arr = target_manifest
+            .get_mut("skills")
+            .and_then(|s| s.as_array_mut())
+            .ok_or_else(|| "Target manifest missing skills array".to_string())?;
+        if let Some(pos) = arr.iter().position(|e| entry_skill_id(e) == Some(skill_id)) {
+            arr[pos] = entry;
+        } else {
+            arr.push(entry);
+        }
+    } else {
+        if path_points_to(&tgt_folder, &src_folder) {
+            remove_path(&tgt_folder)?;
+        }
+        let arr = target_manifest
+            .get_mut("skills")
+            .and_then(|s| s.as_array_mut())
+            .ok_or_else(|| "Target manifest missing skills array".to_string())?;
+        arr.retain(|e| entry_skill_id(e) != Some(skill_id));
+    }
+
+    // Bump lastUpdated so Desktop reloads the manifest on next read.
+    target_manifest
+        .as_object_mut()
+        .ok_or_else(|| "Target manifest is not a JSON object".to_string())?
+        .insert("lastUpdated".to_string(), serde_json::json!(now_unix_millis()));
+    write_json_atomically(&target_combo.join(SKILLS_MANIFEST_FILE), &target_manifest)?;
+    Ok(true)
+}
+
+pub fn list_pair_cowork_skills_sharing(
+    source_data_dir: String,
+    target_data_dir: String,
+) -> Result<PairCoworkSkillsResult, String> {
+    list_pair_cowork_skills(Path::new(&source_data_dir), Path::new(&target_data_dir))
+}
+
+pub fn apply_pair_cowork_skills_sharing(
+    source_data_dir: String,
+    target_data_dir: String,
+    changes: Vec<PairCoworkSkillChange>,
+) -> Result<CopySummary, String> {
+    let source = Path::new(&source_data_dir);
+    let target = Path::new(&target_data_dir);
+    let mut copied = 0;
+    let mut skipped = 0;
+    for change in changes {
+        if set_pair_cowork_skill_shared(source, target, &change.skill_id, change.shared)? {
+            copied += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    Ok(CopySummary { copied, skipped })
+}
+
+// ----- Preferences (Model B, with key allowlist) -----
+
+const SAFE_UI_KEYS: &[&str] = &["darkMode", "scale", "multiTitleBar"];
+const SAFE_DESKTOP_PREF_KEYS: &[&str] = &[
+    "menuBarEnabled",
+    "quickEntryShortcut",
+    "chicagoEnabled",
+    "sidebarMode",
+    "remoteToolsDeviceName",
+    "coworkScheduledTasksEnabled",
+    "ccdScheduledTasksEnabled",
+    "coworkWebSearchEnabled",
+    "launchPreviewPersistSession",
+];
+
+// `serde_json::Value` only implements `PartialEq`, not `Eq` (because of f64
+// NaN), so this struct deliberately doesn't derive Eq.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct PairPreferenceShare {
+    pub key: String,
+    /// "ui" → top-level key in config.json.
+    /// "desktop_pref" → key under "preferences" in claude_desktop_config.json.
+    pub scope: String,
+    pub label: String,
+    pub source_present: bool,
+    pub target_present: bool,
+    pub source_value: Option<serde_json::Value>,
+    pub target_value: Option<serde_json::Value>,
+    pub copied: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct PairPreferenceChange {
+    pub key: String,
+    pub scope: String,
+    pub copied: bool,
+}
+
+fn pref_label(key: &str) -> String {
+    // camelCase → "Sentence case with spaces". Cheap humanization.
+    let mut out = String::new();
+    for (i, c) in key.chars().enumerate() {
+        if i == 0 {
+            out.push(c.to_ascii_uppercase());
+        } else if c.is_uppercase() {
+            out.push(' ');
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn lookup_pref(
+    scope: &str,
+    key: &str,
+    ui: &serde_json::Value,
+    desktop: &serde_json::Value,
+) -> Option<serde_json::Value> {
+    match scope {
+        "ui" => ui.get(key).cloned(),
+        "desktop_pref" => desktop.get("preferences").and_then(|p| p.get(key)).cloned(),
+        _ => None,
+    }
+}
+
+pub fn list_pair_preferences(
+    source_dir: &Path,
+    target_dir: &Path,
+) -> Result<Vec<PairPreferenceShare>, String> {
+    let source_ui = read_ui_config(source_dir)?;
+    let target_ui = read_ui_config(target_dir)?;
+    let source_desktop = read_desktop_config(source_dir)?;
+    let target_desktop = read_desktop_config(target_dir)?;
+
+    let entries: Vec<(&str, &str)> = SAFE_UI_KEYS
+        .iter()
+        .map(|k| ("ui", *k))
+        .chain(SAFE_DESKTOP_PREF_KEYS.iter().map(|k| ("desktop_pref", *k)))
+        .collect();
+
+    Ok(entries
+        .into_iter()
+        .map(|(scope, key)| {
+            let src = lookup_pref(scope, key, &source_ui, &source_desktop);
+            let tgt = lookup_pref(scope, key, &target_ui, &target_desktop);
+            let copied = matches!((&src, &tgt), (Some(a), Some(b)) if a == b);
+            PairPreferenceShare {
+                source_present: src.is_some(),
+                target_present: tgt.is_some(),
+                source_value: src,
+                target_value: tgt,
+                copied,
+                label: pref_label(key),
+                scope: scope.to_string(),
+                key: key.to_string(),
+            }
+        })
+        .collect())
+}
+
+fn set_pair_preference_copied(
+    source_dir: &Path,
+    target_dir: &Path,
+    key: &str,
+    scope: &str,
+    copied: bool,
+) -> Result<bool, String> {
+    let allowed = match scope {
+        "ui" => SAFE_UI_KEYS.contains(&key),
+        "desktop_pref" => SAFE_DESKTOP_PREF_KEYS.contains(&key),
+        _ => false,
+    };
+    if !allowed {
+        return Err(format!(
+            "Preference {scope}:{key} is not in the safe allowlist"
+        ));
+    }
+
+    match scope {
+        "ui" => {
+            let source_ui = read_ui_config(source_dir)?;
+            let mut target_ui = read_ui_config(target_dir)?;
+            let src_val = source_ui.get(key).cloned();
+            let tgt_val = target_ui.get(key).cloned();
+            let currently = matches!((&src_val, &tgt_val), (Some(a), Some(b)) if a == b);
+            if currently == copied {
+                return Ok(false);
+            }
+            let root = target_ui
+                .as_object_mut()
+                .ok_or_else(|| "config.json is not a JSON object".to_string())?;
+            if copied {
+                let v = src_val
+                    .ok_or_else(|| format!("Source has no UI pref \"{key}\""))?;
+                root.insert(key.to_string(), v);
+            } else {
+                root.remove(key);
+            }
+            write_json_atomically(&target_dir.join(UI_CONFIG_FILE), &target_ui)?;
+            Ok(true)
+        }
+        "desktop_pref" => {
+            let source_cfg = read_desktop_config(source_dir)?;
+            let mut target_cfg = read_desktop_config(target_dir)?;
+            let src_val = source_cfg.get("preferences").and_then(|p| p.get(key)).cloned();
+            let tgt_val = target_cfg.get("preferences").and_then(|p| p.get(key)).cloned();
+            let currently = matches!((&src_val, &tgt_val), (Some(a), Some(b)) if a == b);
+            if currently == copied {
+                return Ok(false);
+            }
+            let root = target_cfg
+                .as_object_mut()
+                .ok_or_else(|| "claude_desktop_config.json is not a JSON object".to_string())?;
+            let prefs_entry = root
+                .entry("preferences".to_string())
+                .or_insert_with(|| serde_json::json!({}));
+            let prefs_obj = prefs_entry
+                .as_object_mut()
+                .ok_or_else(|| "preferences must be an object".to_string())?;
+            if copied {
+                let v = src_val.ok_or_else(|| format!("Source has no pref \"{key}\""))?;
+                prefs_obj.insert(key.to_string(), v);
+            } else {
+                prefs_obj.remove(key);
+            }
+            write_json_atomically(&target_dir.join(DESKTOP_CONFIG_FILE), &target_cfg)?;
+            Ok(true)
+        }
+        _ => Err(format!("Unknown preference scope: {scope}")),
+    }
+}
+
+pub fn list_pair_preference_sharing(
+    source_data_dir: String,
+    target_data_dir: String,
+) -> Result<Vec<PairPreferenceShare>, String> {
+    list_pair_preferences(Path::new(&source_data_dir), Path::new(&target_data_dir))
+}
+
+pub fn apply_pair_preference_sharing(
+    source_data_dir: String,
+    target_data_dir: String,
+    changes: Vec<PairPreferenceChange>,
+) -> Result<CopySummary, String> {
+    let source = Path::new(&source_data_dir);
+    let target = Path::new(&target_data_dir);
+    let mut copied = 0;
+    let mut skipped = 0;
+    for change in changes {
+        if set_pair_preference_copied(source, target, &change.key, &change.scope, change.copied)? {
+            copied += 1;
+        } else {
+            skipped += 1;
+        }
+    }
+    Ok(CopySummary { copied, skipped })
+}
+
 mod commands {
     use super::*;
 
@@ -2062,6 +2769,57 @@ mod commands {
     ) -> Result<CopySummary, String> {
         super::apply_pair_desktop_code_history(source_data_dir, target_data_dir, change)
     }
+
+    #[tauri::command]
+    pub fn list_pair_mcp_sharing(
+        source_data_dir: String,
+        target_data_dir: String,
+    ) -> Result<Vec<PairMcpServerShare>, String> {
+        super::list_pair_mcp_sharing(source_data_dir, target_data_dir)
+    }
+
+    #[tauri::command]
+    pub fn apply_pair_mcp_sharing(
+        source_data_dir: String,
+        target_data_dir: String,
+        changes: Vec<PairMcpServerChange>,
+    ) -> Result<CopySummary, String> {
+        super::apply_pair_mcp_sharing(source_data_dir, target_data_dir, changes)
+    }
+
+    #[tauri::command]
+    pub fn list_pair_cowork_skills_sharing(
+        source_data_dir: String,
+        target_data_dir: String,
+    ) -> Result<PairCoworkSkillsResult, String> {
+        super::list_pair_cowork_skills_sharing(source_data_dir, target_data_dir)
+    }
+
+    #[tauri::command]
+    pub fn apply_pair_cowork_skills_sharing(
+        source_data_dir: String,
+        target_data_dir: String,
+        changes: Vec<PairCoworkSkillChange>,
+    ) -> Result<CopySummary, String> {
+        super::apply_pair_cowork_skills_sharing(source_data_dir, target_data_dir, changes)
+    }
+
+    #[tauri::command]
+    pub fn list_pair_preference_sharing(
+        source_data_dir: String,
+        target_data_dir: String,
+    ) -> Result<Vec<PairPreferenceShare>, String> {
+        super::list_pair_preference_sharing(source_data_dir, target_data_dir)
+    }
+
+    #[tauri::command]
+    pub fn apply_pair_preference_sharing(
+        source_data_dir: String,
+        target_data_dir: String,
+        changes: Vec<PairPreferenceChange>,
+    ) -> Result<CopySummary, String> {
+        super::apply_pair_preference_sharing(source_data_dir, target_data_dir, changes)
+    }
 }
 
 pub fn run() {
@@ -2081,7 +2839,13 @@ pub fn run() {
             commands::list_pair_code_history_sharing,
             commands::apply_pair_code_history_sharing,
             commands::list_pair_desktop_code_history,
-            commands::apply_pair_desktop_code_history
+            commands::apply_pair_desktop_code_history,
+            commands::list_pair_mcp_sharing,
+            commands::apply_pair_mcp_sharing,
+            commands::list_pair_cowork_skills_sharing,
+            commands::apply_pair_cowork_skills_sharing,
+            commands::list_pair_preference_sharing,
+            commands::apply_pair_preference_sharing
         ])
         .run(tauri::generate_context!())
         .expect("error while running Claude Multiprofile");
@@ -2791,5 +3555,335 @@ mod tests {
         if let Some(default) = installs.iter().find(|i| i.kind == "default") {
             assert_eq!(default.id, "default");
         }
+    }
+
+    // ----- MCP server sharing -----
+
+    fn write_desktop_config(dir: &Path, value: serde_json::Value) {
+        fs::write(
+            dir.join(DESKTOP_CONFIG_FILE),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_pair_mcp_servers_unions_keys_and_detects_equal_values() {
+        let src = tempfile::tempdir().unwrap();
+        let tgt = tempfile::tempdir().unwrap();
+        write_desktop_config(
+            src.path(),
+            serde_json::json!({
+                "mcpServers": {
+                    "shared": { "command": "npx", "args": ["foo"] },
+                    "only-src": { "command": "echo" }
+                }
+            }),
+        );
+        write_desktop_config(
+            tgt.path(),
+            serde_json::json!({
+                "mcpServers": {
+                    "shared": { "command": "npx", "args": ["foo"] },
+                    "only-tgt": { "command": "cat" }
+                }
+            }),
+        );
+
+        let rows = list_pair_mcp_servers(src.path(), tgt.path()).unwrap();
+        // Sorted alphabetically.
+        assert_eq!(
+            rows.iter().map(|r| r.name.clone()).collect::<Vec<_>>(),
+            vec!["only-src", "only-tgt", "shared"],
+        );
+        let shared = rows.iter().find(|r| r.name == "shared").unwrap();
+        assert!(shared.source_present && shared.target_present);
+        assert!(shared.copied);
+        let only_src = rows.iter().find(|r| r.name == "only-src").unwrap();
+        assert!(only_src.source_present && !only_src.target_present);
+        assert!(!only_src.copied);
+    }
+
+    #[test]
+    fn apply_pair_mcp_sharing_copies_and_removes() {
+        let src = tempfile::tempdir().unwrap();
+        let tgt = tempfile::tempdir().unwrap();
+        write_desktop_config(
+            src.path(),
+            serde_json::json!({
+                "mcpServers": { "foo": { "command": "npx" } }
+            }),
+        );
+        write_desktop_config(
+            tgt.path(),
+            serde_json::json!({
+                "mcpServers": { "bar": { "command": "cat" } }
+            }),
+        );
+
+        // Copy "foo" from src to tgt.
+        let summary = apply_pair_mcp_sharing(
+            src.path().to_string_lossy().into(),
+            tgt.path().to_string_lossy().into(),
+            vec![PairMcpServerChange {
+                name: "foo".to_string(),
+                copied: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+
+        let tgt_cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(tgt.path().join(DESKTOP_CONFIG_FILE)).unwrap())
+                .unwrap();
+        assert_eq!(
+            tgt_cfg["mcpServers"]["foo"]["command"].as_str().unwrap(),
+            "npx"
+        );
+        // Existing key should stay untouched.
+        assert_eq!(
+            tgt_cfg["mcpServers"]["bar"]["command"].as_str().unwrap(),
+            "cat"
+        );
+
+        // Now remove "foo" from tgt.
+        let summary = apply_pair_mcp_sharing(
+            src.path().to_string_lossy().into(),
+            tgt.path().to_string_lossy().into(),
+            vec![PairMcpServerChange {
+                name: "foo".to_string(),
+                copied: false,
+            }],
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+
+        let tgt_cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(tgt.path().join(DESKTOP_CONFIG_FILE)).unwrap())
+                .unwrap();
+        assert!(tgt_cfg["mcpServers"].get("foo").is_none());
+        assert!(tgt_cfg["mcpServers"].get("bar").is_some());
+    }
+
+    #[test]
+    fn apply_pair_mcp_sharing_no_op_when_already_equal() {
+        let src = tempfile::tempdir().unwrap();
+        let tgt = tempfile::tempdir().unwrap();
+        let val = serde_json::json!({ "mcpServers": { "x": { "command": "y" } } });
+        write_desktop_config(src.path(), val.clone());
+        write_desktop_config(tgt.path(), val);
+
+        let summary = apply_pair_mcp_sharing(
+            src.path().to_string_lossy().into(),
+            tgt.path().to_string_lossy().into(),
+            vec![PairMcpServerChange {
+                name: "x".to_string(),
+                copied: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 0);
+        assert_eq!(summary.skipped, 1);
+    }
+
+    // ----- Preferences sharing -----
+
+    #[test]
+    fn list_pair_preferences_returns_allowlist_keys_in_both_scopes() {
+        let src = tempfile::tempdir().unwrap();
+        let tgt = tempfile::tempdir().unwrap();
+        // UI scope
+        fs::write(
+            src.path().join(UI_CONFIG_FILE),
+            r#"{"darkMode":"dark","scale":1}"#,
+        )
+        .unwrap();
+        // Desktop pref scope
+        write_desktop_config(
+            src.path(),
+            serde_json::json!({
+                "preferences": { "menuBarEnabled": true, "chicagoEnabled": false }
+            }),
+        );
+
+        let rows = list_pair_preferences(src.path(), tgt.path()).unwrap();
+        // All allowlisted keys appear, even when target is empty.
+        let ui_keys: Vec<_> = rows.iter().filter(|r| r.scope == "ui").map(|r| r.key.clone()).collect();
+        assert!(ui_keys.contains(&"darkMode".to_string()));
+        assert!(ui_keys.contains(&"scale".to_string()));
+        let darkmode = rows.iter().find(|r| r.key == "darkMode").unwrap();
+        assert!(darkmode.source_present);
+        assert!(!darkmode.target_present);
+        assert!(!darkmode.copied);
+    }
+
+    #[test]
+    fn apply_pair_preferences_rejects_keys_outside_allowlist() {
+        let src = tempfile::tempdir().unwrap();
+        let tgt = tempfile::tempdir().unwrap();
+        let err = set_pair_preference_copied(
+            src.path(),
+            tgt.path(),
+            "bypassPermissionsOptInByAccount",
+            "desktop_pref",
+            true,
+        )
+        .unwrap_err();
+        assert!(err.contains("allowlist"));
+    }
+
+    #[test]
+    fn apply_pair_preferences_writes_only_target_key() {
+        let src = tempfile::tempdir().unwrap();
+        let tgt = tempfile::tempdir().unwrap();
+        write_desktop_config(
+            src.path(),
+            serde_json::json!({
+                "preferences": {
+                    "menuBarEnabled": true,
+                    "remoteToolsDeviceName": "mac-src"
+                }
+            }),
+        );
+        write_desktop_config(
+            tgt.path(),
+            serde_json::json!({
+                "preferences": {
+                    "remoteToolsDeviceName": "mac-tgt"
+                }
+            }),
+        );
+
+        let summary = apply_pair_preference_sharing(
+            src.path().to_string_lossy().into(),
+            tgt.path().to_string_lossy().into(),
+            vec![PairPreferenceChange {
+                key: "menuBarEnabled".to_string(),
+                scope: "desktop_pref".to_string(),
+                copied: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+
+        let tgt_cfg: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(tgt.path().join(DESKTOP_CONFIG_FILE)).unwrap())
+                .unwrap();
+        // Copied key landed.
+        assert_eq!(tgt_cfg["preferences"]["menuBarEnabled"], serde_json::json!(true));
+        // Untouched key kept its target-side value.
+        assert_eq!(
+            tgt_cfg["preferences"]["remoteToolsDeviceName"]
+                .as_str()
+                .unwrap(),
+            "mac-tgt"
+        );
+    }
+
+    // ----- Cowork Skills sharing -----
+
+    fn write_skills_manifest(combo: &Path, value: serde_json::Value) {
+        fs::create_dir_all(combo).unwrap();
+        fs::write(
+            combo.join(SKILLS_MANIFEST_FILE),
+            serde_json::to_string_pretty(&value).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn list_pair_cowork_skills_reports_bootstrap_when_no_combo() {
+        let src = tempfile::tempdir().unwrap();
+        let tgt = tempfile::tempdir().unwrap();
+        let result = list_pair_cowork_skills(src.path(), tgt.path()).unwrap();
+        assert!(result.source_needs_bootstrap);
+        assert!(result.target_needs_bootstrap);
+        assert!(result.rows.is_empty());
+    }
+
+    #[test]
+    fn cowork_skill_share_symlinks_and_patches_manifest() {
+        let src = tempfile::tempdir().unwrap();
+        let tgt = tempfile::tempdir().unwrap();
+
+        let src_combo = src.path().join(SKILLS_PLUGIN_REL).join("dev-a").join("acct-a");
+        let tgt_combo = tgt.path().join(SKILLS_PLUGIN_REL).join("dev-b").join("acct-b");
+
+        let entry = serde_json::json!({
+            "skillId": "xlsx",
+            "name": "xlsx",
+            "description": "Excel handler",
+            "creatorType": "anthropic",
+            "enabled": true
+        });
+        write_skills_manifest(&src_combo, serde_json::json!({ "skills": [entry] }));
+        write_skills_manifest(&tgt_combo, serde_json::json!({ "skills": [] }));
+
+        // Create source skill folder content.
+        let src_skill_dir = src_combo.join(SKILLS_SUBDIR).join("xlsx");
+        fs::create_dir_all(&src_skill_dir).unwrap();
+        fs::write(src_skill_dir.join("SKILL.md"), "hello").unwrap();
+
+        // Share it.
+        let summary = apply_pair_cowork_skills_sharing(
+            src.path().to_string_lossy().into(),
+            tgt.path().to_string_lossy().into(),
+            vec![PairCoworkSkillChange {
+                skill_id: "xlsx".to_string(),
+                shared: true,
+            }],
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+
+        // Target's skills/xlsx should now be a symlink at source's.
+        let tgt_skill_dir = tgt_combo.join(SKILLS_SUBDIR).join("xlsx");
+        let link_meta = fs::symlink_metadata(&tgt_skill_dir).unwrap();
+        assert!(link_meta.file_type().is_symlink());
+
+        // Target manifest should contain the source entry.
+        let tgt_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(tgt_combo.join(SKILLS_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        let skills = tgt_manifest["skills"].as_array().unwrap();
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0]["skillId"].as_str().unwrap(), "xlsx");
+        assert!(tgt_manifest.get("lastUpdated").is_some());
+
+        // listPairCoworkSkills should now report shared: true.
+        let result = list_pair_cowork_skills(src.path(), tgt.path()).unwrap();
+        assert_eq!(result.rows.len(), 1);
+        assert!(result.rows[0].shared);
+
+        // Unshare and confirm cleanup.
+        let summary = apply_pair_cowork_skills_sharing(
+            src.path().to_string_lossy().into(),
+            tgt.path().to_string_lossy().into(),
+            vec![PairCoworkSkillChange {
+                skill_id: "xlsx".to_string(),
+                shared: false,
+            }],
+        )
+        .unwrap();
+        assert_eq!(summary.copied, 1);
+        assert!(fs::symlink_metadata(&tgt_skill_dir).is_err());
+        let tgt_manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(tgt_combo.join(SKILLS_MANIFEST_FILE)).unwrap(),
+        )
+        .unwrap();
+        assert!(tgt_manifest["skills"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn write_json_atomically_replaces_existing_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("config.json");
+        fs::write(&path, r#"{"old":true}"#).unwrap();
+        write_json_atomically(&path, &serde_json::json!({ "new": 42 })).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(v["new"], serde_json::json!(42));
+        assert!(v.get("old").is_none());
     }
 }

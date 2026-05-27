@@ -123,6 +123,78 @@ export type PairDesktopCodeHistoryChange = {
 };
 
 // -----------------------------
+// Desktop MCP servers (Model B — copy on apply)
+// -----------------------------
+
+export type PairMcpServerShare = {
+  name: string;
+  source_present: boolean;
+  target_present: boolean;
+  /** Short human label, e.g. "npx @modelcontextprotocol/server-..." */
+  source_summary: string | null;
+  target_summary: string | null;
+  /** True iff both sides define this server with an identical config value. */
+  copied: boolean;
+};
+
+export type PairMcpServerChange = {
+  name: string;
+  /** New desired state: true = copy from source, false = remove from target. */
+  copied: boolean;
+};
+
+// -----------------------------
+// Desktop Cowork Skills (Model A — symlink + manifest patch)
+// -----------------------------
+
+export type PairCoworkSkillShare = {
+  skill_id: string;
+  name: string;
+  description: string | null;
+  source_present: boolean;
+  target_present: boolean;
+  source_enabled: boolean;
+  target_enabled: boolean;
+  shared: boolean;
+};
+
+export type PairCoworkSkillsResult = {
+  rows: PairCoworkSkillShare[];
+  /** True iff source has no <dev>/<acct>/ skills-plugin combo yet — open the
+   * Cowork panel in that profile once so the folder is created. */
+  source_needs_bootstrap: boolean;
+  target_needs_bootstrap: boolean;
+};
+
+export type PairCoworkSkillChange = {
+  skill_id: string;
+  shared: boolean;
+};
+
+// -----------------------------
+// Desktop Preferences (Model B — copy on apply, allowlisted keys)
+// -----------------------------
+
+export type PreferenceScope = "ui" | "desktop_pref";
+
+export type PairPreferenceShare = {
+  key: string;
+  scope: PreferenceScope;
+  label: string;
+  source_present: boolean;
+  target_present: boolean;
+  source_value: unknown;
+  target_value: unknown;
+  copied: boolean;
+};
+
+export type PairPreferenceChange = {
+  key: string;
+  scope: PreferenceScope;
+  copied: boolean;
+};
+
+// -----------------------------
 // Shared
 // -----------------------------
 
